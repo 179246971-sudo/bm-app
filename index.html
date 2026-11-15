@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Hihi Studio</title>
+
+  <!-- 添加到主屏幕 -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Hihi Studio">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="icon-192.png">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- 微信里打开时的提示条（要用浏览器打开才能加到桌面） -->
+  <div class="tipbar" id="tipbar" hidden>
+    <span>要加到手机桌面？点右上角 <b>⋯</b> → <b>在浏览器打开</b>，再用浏览器菜单添加</span>
+    <button type="button" id="tipclose" aria-label="关闭">×</button>
+  </div>
+
+  <header class="hd">
+    <h1 id="title">Hihi Studio</h1>
+    <p class="sub" id="sub"></p>
+
+    <div class="stats" id="stats" hidden>
+      <div class="stat"><span>本周已报</span><b id="statWeek">0</b><em>次</em></div>
+      <div class="stat"><span>本月已报</span><b id="statMonth">0</b><em>次</em></div>
+      <div class="stat"><span>今年已报</span><b id="statYear">0</b><em>次</em></div>
+    </div>
+  </header>
+
+  <main id="board">
+    <div class="loading">加载中…</div>
+  </main>
+
+  <footer class="ft">
+    <div class="ft-l">
+      <span id="me"></span>
+      <em id="renameHint">昵称建好后只能改 1 次</em>
+    </div>
+    <a href="javascript:;" id="rename">改昵称</a>
+  </footer>
+
+  <!-- 弹窗 -->
+  <div class="mask" id="mask" hidden>
+    <div class="dialog" id="dialog" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <script src="grid.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

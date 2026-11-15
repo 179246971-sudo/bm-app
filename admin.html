@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Hihi Studio · 管理后台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="admin">
+
+  <header class="hd">
+    <h1>Hihi Studio 后台</h1>
+    <p class="sub" id="subhint">课表设置 · 代报名 · 删人</p>
+  </header>
+
+  <main>
+    <!-- 登录 -->
+    <section id="loginPanel" class="panel">
+      <div class="fld">
+        <label>管理员密码</label>
+        <input id="pwd" type="password" class="inp" autocomplete="current-password"
+               placeholder="Cloudflare 环境变量 ADMIN_PASSWORD">
+      </div>
+      <button id="loginBtn" class="btn primary">进入后台</button>
+      <div class="hint" id="loginHint"></div>
+    </section>
+
+    <!-- 后台 -->
+    <section id="appPanel" hidden>
+      <nav class="tabs">
+        <button class="tab on" data-tab="manage">报名管理</button>
+        <button class="tab" data-tab="schedule">课表设置</button>
+      </nav>
+
+      <!-- 报名管理 -->
+      <div id="tab-manage">
+        <p class="tip">点任意格子：看名单、删人、代报名。<strong>已开课</strong>的格子只能看，不能改。</p>
+        <div id="adminBoard"><div class="loading">加载中…</div></div>
+      </div>
+
+      <!-- 课表设置 -->
+      <div id="tab-schedule" hidden>
+        <div class="fld">
+          <label>页面标题</label>
+          <input id="cfgTitle" class="inp" maxlength="40">
+        </div>
+        <div class="fld">
+          <label>副标题</label>
+          <input id="cfgSub" class="inp" maxlength="80">
+        </div>
+        <div class="fld">
+          <label>取消窗口（分钟）</label>
+          <input id="cfgCancel" class="inp" type="number" min="1" max="120" inputmode="numeric">
+        </div>
+
+        <div class="fld">
+          <label>会员页面显示</label>
+          <label class="switch">
+            <input type="checkbox" id="cfgShowStats">
+            <span>显示「本周 / 本月 / 今年已报」次数</span>
+          </label>
+        </div>
+
+        <div class="fld">
+          <label>时间段与每格名额</label>
+          <table class="ptable">
+            <thead>
+              <tr><th>开始</th><th>结束</th><th>名额</th><th></th></tr>
+            </thead>
+            <tbody id="pbody"></tbody>
+          </table>
+          <button id="addPeriod" class="btn small">＋ 加一个时间段</button>
+        </div>
+
+        <div class="fld">
+          <label>整天停课的星期</label>
+          <div id="dayOffBox" class="chips"></div>
+        </div>
+
+        <button id="saveBtn" class="btn primary">保存设置</button>
+        <div class="hint" id="saveHint"></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="mask" id="mask" hidden>
+    <div class="dialog" id="dialog" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <script src="grid.js"></script>
+  <script src="admin.js"></script>
+</body>
+</html>
