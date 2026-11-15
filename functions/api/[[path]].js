@@ -1,20 +1,35 @@
 /**
- * 报名工具 · 后端接口（Cloudflare Pages Functions）
- * 路由：
- *   会员  /api/board  /api/signup  /api/cancel
- *   管理  /api/admin/login  /api/admin/config  /api/admin/cell
- *         /api/admin/sign   /api/admin/remove
+ * Hihi Studio 报名工具 · 后端（Cloudflare Pages Functions）
+ * v3：白名单入场
  *
- * 课表默认值在 DEFAULTS 里，后台改过之后以数据库里的为准。
+ * 会员：  GET  /api/board?k=码&client=设备号
+ *         POST /api/signup   { date, slotId }
+ *         POST /api/cancel   { date, slotId }
+ *
+ * 管理：  POST /api/admin/login        { password }
+ *         GET  /api/admin/config
+ *         POST /api/admin/config       { config }
+ *         GET  /api/admin/board
+ *         GET  /api/admin/cell?date=&slotId=
+ *         POST /api/admin/sign         { date, slotId, nickname }
+ *         POST /api/admin/remove       { date, slotId, nickname }
+ *         GET  /api/admin/roster
+ *         POST /api/admin/roster/add      { names }
+ *         POST /api/admin/roster/rotate   { nick }
+ *         POST /api/admin/roster/remove   { nick, clearSignups }
+ *         POST /api/admin/roster/restore  { nick }
+ *         POST /api/admin/rename          { nick, newNick }
+ *         GET  /api/admin/export?week=0|1
  */
 
-/* ============ 默认课表（后台没设置过时用这套） ============ */
+/* ==================== 默认课表 ==================== */
 
 const DEFAULTS = {
   title: 'Hihi Studio',
   subtitle: '点格子报名 · 报名后 3 分钟内可取消',
-  cancelMin: 3, // 取消窗口（分钟）
-  showStats: true, // 会员页面是否显示「本周/本月/今年已报」
+  cancelMin: 3,
+  maxPerDay: 2,
+  showStats: true,
   periods: [
     { id: 't1', start: '08:30', end: '09:30', cap: 8 },
     { id: 't2', start: '09:45', end: '10:45', cap: 8 },
@@ -24,17 +39,21 @@ const DEFAULTS = {
     { id: 't6', start: '19:30', end: '20:30', cap: 10 },
     { id: 't7', start: '20:45', end: '21:45', cap: 10 }
   ],
-  dayOff: [],   // 整天停课的星期：0=周日 … 6=周六
-  override: {}  // '星期-时段id': { cap: 20 } 或 { off: true }
+  dayOff: [],
+  override: {}
 };
 
-/* ======================================================== */
-
 const WEEK_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-const TZ = 8 * 3600 * 1000; // 北京时间
-const MAX_RENAMES = 1;      // 会员自己最多改几次名字，改完要找管理员
+const TZ = 8 * 3600 * 1000;
 
-/* ---------------- 时间工具 ---------------- */
+// 入场码字符集：去掉了 0/O/1/I/L 这些容易看错的
+const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+const LOGIN_MAX_FAILS = 5;
+const CODE_MAX_FAILS = 10;
+const LOCK_MS = 10 * 60 * 1000;
+
+/* ==================== 小工具 ==================== */
 
 function bjEpoch(y, m, d, hh, mm) {
   return Date.UTC(y, m - 1, d, hh || 0, mm || 0) - TZ;
@@ -49,9 +68,7 @@ function ymd(p) {
   return p.y + '-' + String(p.m).padStart(2, '0') + '-' + String(p.d).padStart(2, '0');
 }
 
-function mdText(p) {
-  return p.m + '/' + p.d;
-}
+function mdText(p) { return p.m + '/' + p.d; }
 
 function parseYmd(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
@@ -60,17 +77,23 @@ function parseYmd(s) {
   return { y, m: mo, d, dow: new Date(Date.UTC(y, mo - 1, d)).getUTCDay() };
 }
 
-function hhmmOk(s) {
-  return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s || ''));
-}
-
-/* ---------------- 配置读取 / 规范化 ---------------- */
+function hhmmOk(s) { return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s || '')); }
 
 function intIn(v, min, max, dflt) {
   const n = parseInt(v, 10);
   if (!Number.isFinite(n)) return dflt;
   return Math.min(max, Math.max(min, n));
 }
+
+function normCode(s) {
+  return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+}
+
+function cleanName(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim().slice(0, 12);
+}
+
+/* ==================== 配置 ==================== */
 
 function normalizeConfig(raw) {
   const c = raw && typeof raw === 'object' ? raw : {};
@@ -103,6 +126,7 @@ function normalizeConfig(raw) {
     title: String(c.title || DEFAULTS.title).slice(0, 40),
     subtitle: String(c.subtitle === undefined ? DEFAULTS.subtitle : c.subtitle).slice(0, 80),
     cancelMin: intIn(c.cancelMin, 1, 120, 3),
+    maxPerDay: intIn(c.maxPerDay, 1, 20, 2),
     showStats: c.showStats !== false,
     periods: periods.length ? periods : DEFAULTS.periods.slice(),
     dayOff,
@@ -114,23 +138,18 @@ async function getConfig(env) {
   try {
     const row = await env.DB.prepare('SELECT value FROM config WHERE key = ?1').bind('schedule').first();
     if (row && row.value) return normalizeConfig(JSON.parse(row.value));
-  } catch (e) {
-    // config 表还没建：用默认值，不报错
-  }
+  } catch (e) { /* 表还没建 */ }
   return normalizeConfig(DEFAULTS);
 }
 
 async function saveConfig(env, cfg) {
-  const value = JSON.stringify(cfg);
   await env.DB.prepare(
     'INSERT INTO config (key, value) VALUES (?1, ?2) ' +
     'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  )
-    .bind('schedule', value)
-    .run();
+  ).bind('schedule', JSON.stringify(cfg)).run();
 }
 
-/* ---------------- 单元格解析 ---------------- */
+/* ==================== 单元格 ==================== */
 
 function findPeriod(cfg, id) {
   return cfg.periods.find((x) => x.id === id) || null;
@@ -141,14 +160,102 @@ function resolveCell(p, period, cfg) {
   const cap = ov.cap === undefined ? period.cap : ov.cap;
   const off = ov.off === true || cfg.dayOff.indexOf(p.dow) >= 0 || cap <= 0;
   const [sh, sm] = period.start.split(':').map(Number);
-  return { cap, off, startEpoch: bjEpoch(p.y, p.m, p.d, sh, sm), open: 0 };
+  return { cap, off, startEpoch: bjEpoch(p.y, p.m, p.d, sh, sm) };
 }
 
-/* ---------------- 看板 ---------------- */
+/* ==================== 名单 / 入场码 ==================== */
 
-async function loadBoard(env, cfg, clientId, nick) {
-  // 身份按「昵称」认：换手机、换浏览器、苹果加到桌面，只要名字一样就是同一个人
-  const nickKey = String(nick || '').trim().slice(0, 12);
+function makeCode() {
+  const buf = new Uint8Array(6);
+  crypto.getRandomValues(buf);
+  let out = '';
+  for (let i = 0; i < 6; i++) out += CODE_ALPHABET[buf[i] % CODE_ALPHABET.length];
+  return out;
+}
+
+async function uniqueCode(env) {
+  for (let i = 0; i < 12; i++) {
+    const c = makeCode();
+    const hit = await env.DB.prepare('SELECT 1 AS x FROM roster WHERE code = ?1').bind(c).first();
+    if (!hit) return c;
+  }
+  return makeCode();
+}
+
+async function rosterByCode(env, code) {
+  if (!code) return null;
+  try {
+    return await env.DB.prepare('SELECT nick, code, disabled FROM roster WHERE code = ?1').bind(code).first();
+  } catch (e) { return null; }
+}
+
+async function rosterByNick(env, nick) {
+  if (!nick) return null;
+  try {
+    return await env.DB.prepare('SELECT nick, code, disabled FROM roster WHERE nick = ?1').bind(nick).first();
+  } catch (e) { return null; }
+}
+
+// 记一下「这个码被哪台设备用过」，用来提示可能外泄
+async function touchDevice(env, code, clientId) {
+  if (!code || !clientId) return;
+  try {
+    const now = Date.now();
+    const hit = await env.DB.prepare(
+      'SELECT 1 AS x FROM roster_devices WHERE code = ?1 AND client_id = ?2'
+    ).bind(code, clientId).first();
+    if (!hit) {
+      await env.DB.prepare(
+        'INSERT OR IGNORE INTO roster_devices (code, client_id, first_seen, last_seen) VALUES (?1,?2,?3,?3)'
+      ).bind(code, clientId, now).run();
+    }
+    const r = await env.DB.prepare('SELECT last_seen FROM roster WHERE code = ?1').bind(code).first();
+    if (!r || !r.last_seen || now - r.last_seen > 300000) {
+      await env.DB.prepare('UPDATE roster SET last_seen = ?1 WHERE code = ?2').bind(now, code).run();
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
+/* ==================== 防爆破 ==================== */
+
+function ipOf(request) {
+  return request.headers.get('cf-connecting-ip') || 'unknown';
+}
+
+async function lockedMinutes(env, key) {
+  try {
+    const row = await env.DB.prepare('SELECT until FROM throttle WHERE key = ?1').bind(key).first();
+    if (row && row.until && row.until > Date.now()) {
+      return Math.ceil((row.until - Date.now()) / 60000);
+    }
+  } catch (e) { /* 忽略 */ }
+  return 0;
+}
+
+async function addFail(env, key, maxFails) {
+  try {
+    const now = Date.now();
+    const row = await env.DB.prepare('SELECT fails, until FROM throttle WHERE key = ?1').bind(key).first();
+    const base = (row && row.until > now) ? row.fails : (row ? row.fails : 0);
+    let fails = base + 1;
+    let until = 0;
+    if (fails >= maxFails) { until = now + LOCK_MS; fails = 0; }
+    await env.DB.prepare(
+      'INSERT INTO throttle (key, fails, until) VALUES (?1,?2,?3) ' +
+      'ON CONFLICT(key) DO UPDATE SET fails = excluded.fails, until = excluded.until'
+    ).bind(key, fails, until).run();
+  } catch (e) { /* 忽略 */ }
+}
+
+async function clearFails(env, key) {
+  try {
+    await env.DB.prepare('DELETE FROM throttle WHERE key = ?1').bind(key).run();
+  } catch (e) { /* 忽略 */ }
+}
+
+/* ==================== 看板 ==================== */
+
+async function loadBoard(env, cfg, who, clientId) {
   const now = Date.now();
   const t = bjParts(now);
   const todayStr = ymd(t);
@@ -169,10 +276,9 @@ async function loadBoard(env, cfg, clientId, nick) {
   const to = weeks[1][6].date;
 
   const rs = await env.DB.prepare(
-    'SELECT slot_date, slot_id, client_id, nickname, created_at FROM signups WHERE slot_date >= ?1 AND slot_date <= ?2 ORDER BY created_at'
-  )
-    .bind(from, to)
-    .all();
+    'SELECT slot_date, slot_id, nickname, created_at FROM signups ' +
+    'WHERE slot_date >= ?1 AND slot_date <= ?2 ORDER BY created_at'
+  ).bind(from, to).all();
 
   const bucket = new Map();
   for (const r of rs.results || []) {
@@ -181,43 +287,34 @@ async function loadBoard(env, cfg, clientId, nick) {
     bucket.get(k).push(r);
   }
 
+  const myName = who ? who.nick : '';
 
-  // 会员自己：本周 / 本月 / 今年各报了几次（含已经上过的课，取消掉的不算）
-  const monthStart = t.y + '-' + String(t.m).padStart(2, '0') + '-01';
-  const lastDay = new Date(Date.UTC(t.y, t.m, 0)).getUTCDate();
-  const monthEnd = t.y + '-' + String(t.m).padStart(2, '0') + '-' + String(lastDay).padStart(2, '0');
-  const weekStart = weeks[0][0].date;
-  const weekEnd = weeks[0][6].date;
-  const yearStart = t.y + '-01-01';
-  const yearEnd = t.y + '-12-31';
-  const qFrom = [yearStart, weekStart].sort()[0];
-  const qTo = [yearEnd, weekEnd].sort().slice(-1)[0];
-
-  // 后台可以关掉这个统计（关掉就完全不算、也不返回，省一次查询）
   let stats = null;
   if (cfg.showStats) {
-    let statDates = [];
-    const idCol = nickKey ? 'nickname' : 'client_id';
-    const idVal = nickKey || clientId;
-    if (idVal) {
+    const monthStart = t.y + '-' + String(t.m).padStart(2, '0') + '-01';
+    const lastDay = new Date(Date.UTC(t.y, t.m, 0)).getUTCDate();
+    const monthEnd = t.y + '-' + String(t.m).padStart(2, '0') + '-' + String(lastDay).padStart(2, '0');
+    const weekStart = weeks[0][0].date;
+    const weekEnd = weeks[0][6].date;
+    const yearStart = t.y + '-01-01';
+    const yearEnd = t.y + '-12-31';
+    const qFrom = [yearStart, weekStart].sort()[0];
+    const qTo = [yearEnd, weekEnd].sort().slice(-1)[0];
+
+    let dates = [];
+    if (myName) {
       const sr = await env.DB.prepare(
-        'SELECT slot_date FROM signups WHERE ' + idCol + ' = ?1 AND slot_date >= ?2 AND slot_date <= ?3'
-      )
-        .bind(idVal, qFrom, qTo)
-        .all();
-      statDates = (sr.results || []).map((r) => r.slot_date);
+        'SELECT slot_date FROM signups WHERE nickname = ?1 AND slot_date >= ?2 AND slot_date <= ?3'
+      ).bind(myName, qFrom, qTo).all();
+      dates = (sr.results || []).map((r) => r.slot_date);
     }
     const yearStr = String(t.y);
     stats = {
-      week: statDates.filter((d) => d >= weekStart && d <= weekEnd).length,
-      month: statDates.filter((d) => d >= monthStart && d <= monthEnd).length,
-      year: statDates.filter((d) => d.slice(0, 4) === yearStr).length
+      week: dates.filter((d) => d >= weekStart && d <= weekEnd).length,
+      month: dates.filter((d) => d >= monthStart && d <= monthEnd).length,
+      year: dates.filter((d) => d.slice(0, 4) === yearStr).length
     };
   }
-
-  const meRow = await getMember(env, clientId);
-  const myName = meRow ? meRow.nick : '';
-  const renamesLeft = meRow ? Math.max(0, MAX_RENAMES - meRow.renames) : MAX_RENAMES;
 
   const cancelMs = cfg.cancelMin * 60000;
 
@@ -228,122 +325,110 @@ async function loadBoard(env, cfg, clientId, nick) {
       const past = date < todayStr;
       const isToday = date === todayStr;
       const cells = cfg.periods.map((per) => {
-        const cfgCell = resolveCell(p, per, cfg);
+        const cc = resolveCell(p, per, cfg);
         const list = bucket.get(date + '|' + per.id) || [];
-        const mineRow = (nickKey
-          ? list.find((x) => x.nickname === nickKey)
-          : list.find((x) => x.client_id === clientId)) || null;
+        const mineRow = myName ? (list.find((x) => x.nickname === myName) || null) : null;
         const count = list.length;
         return {
           periodId: per.id,
           time: per.start + '-' + per.end,
-          cap: cfgCell.cap,
+          cap: cc.cap,
           count,
-          full: cfgCell.cap > 0 && count >= cfgCell.cap,
-          off: cfgCell.off,
-          open: !cfgCell.off && !past && now < cfgCell.startEpoch,
+          full: cc.cap > 0 && count >= cc.cap,
+          off: cc.off,
+          open: !cc.off && !past && now < cc.startEpoch,
           mine: !!mineRow,
-          myAt: mineRow ? mineRow.created_at : null,
           canCancel: !!mineRow && now - mineRow.created_at <= cancelMs,
           cancelLeft: mineRow ? Math.max(0, cancelMs - (now - mineRow.created_at)) : 0,
           names: list.map((x) => x.nickname)
         };
       });
-      return { date, weekday: WEEK_CN[p.dow], md: mdText(p), past, isToday, cells };
+
+      let myCountToday = 0;
+      if (myName) {
+        myCountToday = cfg.periods.filter((per) => {
+          const l = bucket.get(date + '|' + per.id) || [];
+          return l.some((x) => x.nickname === myName);
+        }).length;
+      }
+
+      return { date, weekday: WEEK_CN[p.dow], md: mdText(p), past, isToday, myCountToday, cells };
     })
   }));
 
   return {
     title: cfg.title,
-    subtitle: cfg.subtitle.replace('{n}', String(cfg.cancelMin)),
-    now,
-    today: todayStr,
+    subtitle: cfg.subtitle,
+    now, today: todayStr,
     cancelMin: cfg.cancelMin,
+    maxPerDay: cfg.maxPerDay,
     stats,
     myName,
-    renamesLeft,
-    renamesMax: MAX_RENAMES,
     periods: cfg.periods.map((p) => ({ id: p.id, start: p.start, end: p.end })),
     weeks: outWeeks
   };
 }
 
-/* ---------------- 报名（会员） ---------------- */
+/* ==================== 会员：报名 / 取消 ==================== */
 
-async function doSignup(env, cfg, body) {
-  const { date, slotId, clientId, nickname } = body || {};
-  if (!clientId) return { error: '缺少身份标识，请刷新页面' };
+async function doSignup(env, cfg, who, body) {
+  if (!who) return { error: '需要入场码' };
+  if (who.disabled) return { error: '你的入场码已失效，请联系群主' };
 
-  const nick = String(nickname || '').trim().slice(0, 12);
-  if (!nick) return { error: '请先填一个昵称' };
-
+  const { date, slotId } = body || {};
   const p = parseYmd(date);
   if (!p) return { error: '日期不对' };
   const period = findPeriod(cfg, slotId);
   if (!period) return { error: '没有这个时段' };
 
-  const c = resolveCell(p, period, cfg);
-  if (c.off) return { error: '这个时段不开课' };
-  if (Date.now() >= c.startEpoch) return { error: '这个时段已经开始了，不能再报名' };
+  const cc = resolveCell(p, period, cfg);
+  if (cc.off) return { error: '这个时段不开课' };
+  if (Date.now() >= cc.startEpoch) return { error: '这个时段已经开始了，不能再报名' };
 
-  // 一个人同一节课只能报一次：
-  // 既按身份编号拦（同一台设备），也按昵称拦（换手机、清缓存后重名）
-  const dup = await env.DB.prepare(
-    'SELECT client_id FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND (client_id = ?3 OR nickname = ?4) LIMIT 1'
-  )
-    .bind(date, slotId, clientId, nick)
-    .first();
-  if (dup) return { error: '「' + nick + '」已经报过这个时段了，同一节课只能报一次' };
+  const used = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM signups WHERE nickname = ?1 AND slot_date = ?2'
+  ).bind(who.nick, date).first();
+  if (used && used.n >= cfg.maxPerDay) {
+    return { error: '这一天你已经报了 ' + used.n + ' 节，最多 ' + cfg.maxPerDay + ' 节。要加课请联系群主' };
+  }
 
   const sql =
-    'INSERT INTO signups (slot_date, slot_id, client_id, nickname, created_at) ' +
-    'SELECT ?1, ?2, ?3, ?4, ?5 ' +
-    'WHERE (SELECT COUNT(*) FROM signups WHERE slot_date = ?1 AND slot_id = ?2) < ?6';
+    'INSERT INTO signups (slot_date, slot_id, nickname, created_at) ' +
+    'SELECT ?1, ?2, ?3, ?4 ' +
+    'WHERE (SELECT COUNT(*) FROM signups WHERE slot_date = ?1 AND slot_id = ?2) < ?5';
 
   let res;
   try {
-    res = await env.DB.prepare(sql).bind(date, slotId, clientId, nick, Date.now(), c.cap).run();
+    res = await env.DB.prepare(sql).bind(date, slotId, who.nick, Date.now(), cc.cap).run();
   } catch (e) {
     if (/UNIQUE/i.test(String((e && e.message) || ''))) return { error: '你已经报过这个时段了' };
     throw e;
   }
-
   if (!res.meta || !res.meta.changes) return { error: '名额已满' };
   return { ok: true };
 }
 
-/* ---------------- 取消（会员，3 分钟内） ---------------- */
-
-async function doCancel(env, cfg, body) {
-  const { date, slotId, clientId, nickname } = body || {};
-  const nick = String(nickname || '').trim().slice(0, 12);
-  if (!nick && !clientId) return { error: '缺少身份标识，请刷新页面' };
-
-  const idCol = nick ? 'nickname' : 'client_id';
-  const idVal = nick || clientId;
+async function doCancel(env, cfg, who, body) {
+  if (!who) return { error: '需要入场码' };
+  const { date, slotId } = body || {};
 
   const row = await env.DB.prepare(
-    'SELECT created_at FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND ' + idCol + ' = ?3'
-  )
-    .bind(date, slotId, idVal)
-    .first();
+    'SELECT created_at FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND nickname = ?3'
+  ).bind(date, slotId, who.nick).first();
 
   if (!row) return { error: '你没有报名这个时段' };
-  const cancelMs = cfg.cancelMin * 60000;
-  if (Date.now() - row.created_at > cancelMs) {
+  if (Date.now() - row.created_at > cfg.cancelMin * 60000) {
     return { error: '已超过 ' + cfg.cancelMin + ' 分钟，不能取消了' };
   }
 
   await env.DB.prepare(
-    'DELETE FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND ' + idCol + ' = ?3'
-  )
-    .bind(date, slotId, idVal)
-    .run();
+    'DELETE FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND nickname = ?3'
+  ).bind(date, slotId, who.nick).run();
 
   return { ok: true };
 }
 
-/* ---------------- 管理：单元格详情 ---------------- */
+/* ==================== 管理：格子 ==================== */
 
 async function adminCell(env, cfg, date, slotId) {
   const p = parseYmd(date);
@@ -351,238 +436,241 @@ async function adminCell(env, cfg, date, slotId) {
   const period = findPeriod(cfg, slotId);
   if (!period) return { error: '没有这个时段' };
 
-  const c = resolveCell(p, period, cfg);
+  const cc = resolveCell(p, period, cfg);
   const now = Date.now();
+  const todayStr = ymd(bjParts(now));
 
   const rs = await env.DB.prepare(
-    'SELECT client_id, nickname, created_at FROM signups WHERE slot_date = ?1 AND slot_id = ?2 ORDER BY created_at'
-  )
-    .bind(date, slotId)
-    .all();
+    'SELECT nickname, created_at FROM signups WHERE slot_date = ?1 AND slot_id = ?2 ORDER BY created_at'
+  ).bind(date, slotId).all();
 
-  const people = (rs.results || []).map((r) => ({
-    clientId: r.client_id,
-    nickname: r.nickname,
-    at: r.created_at,
-    byAdmin: String(r.client_id).indexOf('adm:') === 0
-  }));
+  const people = (rs.results || []).map((r) => ({ nickname: r.nickname, at: r.created_at }));
 
   return {
-    date,
-    slotId,
-    weekday: WEEK_CN[p.dow],
-    md: mdText(p),
+    date, slotId,
+    weekday: WEEK_CN[p.dow], md: mdText(p),
     time: period.start + '-' + period.end,
-    cap: c.cap,
-    count: people.length,
-    off: c.off,
-    started: now >= c.startEpoch,
-    past: date < ymd(bjParts(now)),
-    editable: !c.off && now < c.startEpoch && date >= ymd(bjParts(now)),
+    cap: cc.cap, count: people.length, off: cc.off,
+    started: now >= cc.startEpoch,
+    past: date < todayStr,
+    editable: !cc.off && now < cc.startEpoch && date >= todayStr,
     people
   };
 }
 
-/* ---------------- 管理：代报名 ---------------- */
-
 async function adminSign(env, cfg, body) {
-  const { date, slotId, nickname } = body || {};
-  const nick = String(nickname || '').trim().slice(0, 12);
-  if (!nick) return { error: '请填要代报的昵称' };
+  const { date, slotId } = body || {};
+  const nick = cleanName(body && body.nickname);
+  if (!nick) return { error: '请填要代报的名字' };
+
+  const r = await rosterByNick(env, nick);
+  if (!r) return { error: '名单里没有「' + nick + '」，先在「名单」页签里加进来' };
+  if (r.disabled) return { error: '「' + nick + '」已被移出名单' };
 
   const p = parseYmd(date);
   if (!p) return { error: '日期不对' };
   const period = findPeriod(cfg, slotId);
   if (!period) return { error: '没有这个时段' };
 
-  const c = resolveCell(p, period, cfg);
-  if (c.off) return { error: '这个时段不开课' };
-  if (Date.now() >= c.startEpoch) return { error: '这个时段已经开始了，不能再报名' };
+  const cc = resolveCell(p, period, cfg);
+  if (cc.off) return { error: '这个时段不开课' };
+  if (Date.now() >= cc.startEpoch) return { error: '这个时段已经开始了，不能再报名' };
 
-  // 代报也要查重：这个名字（不管是他自己报的还是别的管理员代报的）在这一格已经存在就不许再加
-  const dup = await env.DB.prepare(
-    'SELECT client_id FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND (nickname = ?3 OR client_id = ?4) LIMIT 1'
-  )
-    .bind(date, slotId, nick, 'adm:' + nick)
-    .first();
-  if (dup) return { error: '「' + nick + '」已经报过这个时段了，不能重复代报' };
-
-  const clientId = 'adm:' + nick;
   const sql =
-    'INSERT INTO signups (slot_date, slot_id, client_id, nickname, created_at) ' +
-    'SELECT ?1, ?2, ?3, ?4, ?5 ' +
-    'WHERE (SELECT COUNT(*) FROM signups WHERE slot_date = ?1 AND slot_id = ?2) < ?6';
+    'INSERT INTO signups (slot_date, slot_id, nickname, created_at) ' +
+    'SELECT ?1, ?2, ?3, ?4 ' +
+    'WHERE (SELECT COUNT(*) FROM signups WHERE slot_date = ?1 AND slot_id = ?2) < ?5';
 
   let res;
   try {
-    res = await env.DB.prepare(sql).bind(date, slotId, clientId, nick, Date.now(), c.cap).run();
+    res = await env.DB.prepare(sql).bind(date, slotId, nick, Date.now(), cc.cap).run();
   } catch (e) {
-    if (/UNIQUE/i.test(String((e && e.message) || ''))) return { error: '这个名字已经报过了' };
+    if (/UNIQUE/i.test(String((e && e.message) || ''))) return { error: '「' + nick + '」已经报过这个时段了' };
     throw e;
   }
-
-  if (!res.meta || !res.meta.changes) return { error: '名额已满（上限 ' + c.cap + ' 人）' };
+  if (!res.meta || !res.meta.changes) return { error: '名额已满（上限 ' + cc.cap + ' 人）' };
   return { ok: true };
 }
 
-/* ---------------- 管理：删除某人 ---------------- */
-
 async function adminRemove(env, cfg, body) {
-  const { date, slotId, clientId } = body || {};
-  if (!clientId) return { error: '缺少要删除的人' };
+  const { date, slotId } = body || {};
+  const nick = cleanName(body && body.nickname);
+  if (!nick) return { error: '缺少要删除的人' };
 
   const p = parseYmd(date);
   if (!p) return { error: '日期不对' };
   const period = findPeriod(cfg, slotId);
   if (!period) return { error: '没有这个时段' };
 
-  const c = resolveCell(p, period, cfg);
-  if (Date.now() >= c.startEpoch) return { error: '这个时段已经开始了，不能改报名' };
-  if (c.off) return { error: '这个时段不开课' };
+  const cc = resolveCell(p, period, cfg);
+  if (Date.now() >= cc.startEpoch) return { error: '这个时段已经开始了，不能改报名' };
 
   const res = await env.DB.prepare(
-    'DELETE FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND client_id = ?3'
-  )
-    .bind(date, slotId, clientId)
-    .run();
+    'DELETE FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND nickname = ?3'
+  ).bind(date, slotId, nick).run();
 
   if (!res.meta || !res.meta.changes) return { error: '没找到这条报名记录' };
   return { ok: true };
 }
 
+/* ==================== 管理：名单 ==================== */
 
-/* ---------------- 会员档案：昵称 + 改名次数 ---------------- */
+async function adminRoster(env) {
+  const rs = await env.DB.prepare(
+    'SELECT nick, code, disabled, created_at, last_seen FROM roster ORDER BY created_at'
+  ).all();
 
-async function getMember(env, clientId) {
-  if (!clientId) return null;
-  try {
-    return await env.DB.prepare(
-      'SELECT nick, renames FROM members WHERE client_id = ?1'
-    ).bind(clientId).first();
-  } catch (e) {
-    return null; // members 表还没建，当作没档案
-  }
+  const dev = await env.DB.prepare('SELECT code, COUNT(*) AS n FROM roster_devices GROUP BY code').all();
+  const devMap = new Map();
+  for (const d of dev.results || []) devMap.set(d.code, d.n);
+
+  const cnt = await env.DB.prepare('SELECT nickname, COUNT(*) AS n FROM signups GROUP BY nickname').all();
+  const cntMap = new Map();
+  for (const c of cnt.results || []) cntMap.set(c.nickname, c.n);
+
+  return {
+    people: (rs.results || []).map((r) => ({
+      nick: r.nick,
+      code: r.code,
+      disabled: !!r.disabled,
+      devices: devMap.get(r.code) || 0,
+      signups: cntMap.get(r.nick) || 0,
+      lastSeen: r.last_seen || 0,
+      createdAt: r.created_at
+    }))
+  };
 }
 
-// 改这个人的名字：档案 + 他名下所有报名记录一起改，
-// 否则改名就等于把以前的报名弄丢了。
-async function renameEverybody(env, clientId, nick, lock) {
-  await env.DB.prepare(
-    'UPDATE signups SET nickname = ?1 WHERE client_id = ?2'
-  ).bind(nick, clientId).run();
+async function adminRosterAdd(env, body) {
+  const raw = String((body && body.names) || '');
+  const names = raw.split(/[\n,，、;；]+/).map(cleanName).filter(Boolean);
 
-  const m = await getMember(env, clientId);
-  if (m) {
+  const uniq = [];
+  for (const n of names) if (uniq.indexOf(n) < 0) uniq.push(n);
+  if (!uniq.length) return { error: '没有解析出名字' };
+  if (uniq.length > 200) return { error: '一次最多加 200 个' };
+
+  const added = [];
+  const skipped = [];
+
+  for (const nick of uniq) {
+    const exist = await env.DB.prepare('SELECT disabled FROM roster WHERE nick = ?1').bind(nick).first();
+    if (exist) {
+      if (exist.disabled) {
+        await env.DB.prepare('UPDATE roster SET disabled = 0 WHERE nick = ?1').bind(nick).run();
+        added.push(nick);
+      } else {
+        skipped.push(nick);
+      }
+      continue;
+    }
+    const code = await uniqueCode(env);
     await env.DB.prepare(
-      'UPDATE members SET nick = ?1 WHERE client_id = ?2'
-    ).bind(nick, clientId).run();
-  } else {
-    await env.DB.prepare(
-      'INSERT INTO members (client_id, nick, renames, created_at) VALUES (?1, ?2, 0, ?3)'
-    ).bind(clientId, nick, Date.now()).run();
+      'INSERT INTO roster (nick, code, disabled, created_at) VALUES (?1, ?2, 0, ?3)'
+    ).bind(nick, code, Date.now()).run();
+    added.push(nick);
   }
 
-  // 管理员改的名，要把会员自助改名的机会清零——
-  // 否则她随手一改就又把名字改回去了。
-  if (lock) {
-    await env.DB.prepare(
-      'UPDATE members SET renames = ?1 WHERE client_id = ?2'
-    ).bind(MAX_RENAMES, clientId).run();
-  }
+  return { ok: true, added, skipped };
 }
 
-// 改成这个名字会不会和同一格里别人撞名
-async function nameClash(env, clientId, nick) {
+async function adminRosterRotate(env, body) {
+  const nick = cleanName(body && body.nick);
+  if (!nick) return { error: '缺少名字' };
+  const r = await rosterByNick(env, nick);
+  if (!r) return { error: '名单里没有这个人' };
+
+  const code = await uniqueCode(env);
+  await env.DB.prepare('UPDATE roster SET code = ?1 WHERE nick = ?2').bind(code, nick).run();
   try {
-    const row = await env.DB.prepare(
-      'SELECT 1 AS x FROM signups a ' +
-      'JOIN signups b ON a.slot_date = b.slot_date AND a.slot_id = b.slot_id ' +
-      'WHERE a.client_id = ?1 AND b.nickname = ?2 AND b.client_id <> ?1 LIMIT 1'
-    ).bind(clientId, nick).first();
-    return !!row;
-  } catch (e) {
-    return false; // 表没有时不做检查，别把改名卡死
-  }
+    await env.DB.prepare('DELETE FROM roster_devices WHERE code = ?1').bind(r.code).run();
+  } catch (e) { /* 忽略 */ }
+  return { ok: true, code };
 }
 
-async function setName(env, body) {
-  const { clientId, nickname } = body || {};
-  if (!clientId) return { error: '缺少身份标识，请刷新页面' };
+async function adminRosterRemove(env, body) {
+  const nick = cleanName(body && body.nick);
+  if (!nick) return { error: '缺少名字' };
+  const r = await rosterByNick(env, nick);
+  if (!r) return { error: '名单里没有这个人' };
 
-  const nick = String(nickname || '').trim().slice(0, 12);
-  if (!nick) return { error: '请填一个昵称' };
+  await env.DB.prepare('UPDATE roster SET disabled = 1 WHERE nick = ?1').bind(nick).run();
 
-  let member;
-  try {
-    member = await env.DB.prepare(
-      'SELECT nick, renames FROM members WHERE client_id = ?1'
-    ).bind(clientId).first();
-  } catch (e) {
-    return { error: '数据库缺少 members 表，请先在 D1 里执行最新的 schema.sql' };
+  let removed = 0;
+  if (body && body.clearSignups) {
+    const res = await env.DB.prepare('DELETE FROM signups WHERE nickname = ?1').bind(nick).run();
+    removed = (res.meta && res.meta.changes) || 0;
   }
-
-  // 名字没变：不算次数
-  if (member && member.nick === nick) {
-    return { ok: true, nick, renamesLeft: Math.max(0, MAX_RENAMES - member.renames) };
-  }
-
-  if (member && member.renames >= MAX_RENAMES) {
-    return { error: '改名次数已用完（只能改 ' + MAX_RENAMES + ' 次），要改请找群主' };
-  }
-
-  if (await nameClash(env, clientId, nick)) {
-    return { error: '「' + nick + '」已经有人用了，换一个名字' };
-  }
-
-  await renameEverybody(env, clientId, nick, false);
-
-  let left = MAX_RENAMES;
-  if (member) {
-    await env.DB.prepare(
-      'UPDATE members SET renames = renames + 1 WHERE client_id = ?1'
-    ).bind(clientId).run();
-    left = Math.max(0, MAX_RENAMES - (member.renames + 1));
-  }
-  return { ok: true, nick, renamesLeft: left };
+  return { ok: true, removedSignups: removed };
 }
 
-async function adminRename(env, cfg, body) {
-  const { clientId, nickname } = body || {};
-  if (!clientId) return { error: '缺少要改名的人' };
-
-  const nick = String(nickname || '').trim().slice(0, 12);
-  if (!nick) return { error: '昵称不能为空' };
-
-  // 有报名记录，或者只是建过名字（还没报名）都允许改
-  const hasSignup = await env.DB.prepare(
-    'SELECT 1 AS x FROM signups WHERE client_id = ?1 LIMIT 1'
-  ).bind(clientId).first();
-  const hasProfile = await getMember(env, clientId);
-  if (!hasSignup && !hasProfile) return { error: '没找到这个人的记录' };
-
-  if (await nameClash(env, clientId, nick)) return { error: '「' + nick + '」已经有人用了' };
-
-  await renameEverybody(env, clientId, nick, true);
-  return { ok: true, locked: true };
+async function adminRosterRestore(env, body) {
+  const nick = cleanName(body && body.nick);
+  if (!nick) return { error: '缺少名字' };
+  const r = await rosterByNick(env, nick);
+  if (!r) return { error: '名单里没有这个人' };
+  await env.DB.prepare('UPDATE roster SET disabled = 0 WHERE nick = ?1').bind(nick).run();
+  return { ok: true };
 }
 
-async function adminResetRenames(env, body) {
-  const { clientId } = body || {};
-  if (!clientId) return { error: '缺少要重置的人' };
+async function adminRename(env, body) {
+  const nick = cleanName(body && body.nick);
+  const newNick = cleanName(body && body.newNick);
+  if (!nick || !newNick) return { error: '名字不能为空' };
+  if (nick === newNick) return { ok: true };
 
-  try {
-    const res = await env.DB.prepare(
-      'UPDATE members SET renames = 0 WHERE client_id = ?1'
-    ).bind(clientId).run();
-    if (!res.meta || !res.meta.changes) return { error: '这个人还没设过名字，不用重置' };
-    return { ok: true };
-  } catch (e) {
-    return { error: '数据库缺少 members 表，请先执行最新的 schema.sql' };
+  const r = await rosterByNick(env, nick);
+  if (!r) return { error: '名单里没有这个人' };
+  if (await rosterByNick(env, newNick)) return { error: '「' + newNick + '」已经在名单里了' };
+
+  await env.DB.prepare('UPDATE roster SET nick = ?1 WHERE nick = ?2').bind(newNick, nick).run();
+  await env.DB.prepare('UPDATE signups SET nickname = ?1 WHERE nickname = ?2').bind(newNick, nick).run();
+  return { ok: true };
+}
+
+/* ==================== 管理：导出 CSV ==================== */
+
+async function adminExport(env, cfg, week) {
+  const now = Date.now();
+  const t = bjParts(now);
+  const backToMon = (t.dow + 6) % 7;
+  const base = bjEpoch(t.y, t.m, t.d, 0, 0) - backToMon * 86400000;
+  const offset = (week === 1 ? 7 : 0) * 86400000;
+  const from = ymd(bjParts(base + offset));
+  const to = ymd(bjParts(base + offset + 6 * 86400000));
+
+  const rs = await env.DB.prepare(
+    'SELECT slot_date, slot_id, nickname FROM signups WHERE slot_date >= ?1 AND slot_date <= ?2'
+  ).bind(from, to).all();
+
+  const map = new Map();
+  for (const r of rs.results || []) {
+    const k = r.slot_date + '|' + r.slot_id;
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(r.nickname);
   }
+
+  const rows = [['日期', '星期', '时段', '名额', '已报', '报名人']];
+  for (let i = 0; i < 7; i++) {
+    const p = bjParts(base + offset + i * 86400000);
+    const date = ymd(p);
+    for (const per of cfg.periods) {
+      const cc = resolveCell(p, per, cfg);
+      if (cc.off) continue;
+      const names = map.get(date + '|' + per.id) || [];
+      rows.push([date, WEEK_CN[p.dow], per.start + '-' + per.end,
+                 String(cc.cap), String(names.length), names.join('、')]);
+    }
+  }
+
+  const csv = rows.map((r) =>
+    r.map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(',')
+  ).join('\r\n');
+
+  return { csv: '\uFEFF' + csv, filename: 'baoming_' + from + '_' + to + '.csv' };
 }
 
-/* ---------------- 入口 ---------------- */
-
+/* ==================== 入口 ==================== */
 
 function json(obj, status) {
   return new Response(JSON.stringify(obj), {
@@ -600,9 +688,10 @@ export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/api\/?/, '').replace(/\/$/, '');
+  const ip = ipOf(request);
 
   if (!env.DB) {
-    return json({ error: '数据库未绑定：请在 Pages 项目 Settings → Bindings 里加一个 D1 绑定，变量名必须是 DB' }, 500);
+    return json({ error: '数据库未绑定：Settings → Bindings 加 D1，变量名必须是 DB' }, 500);
   }
 
   try {
@@ -610,14 +699,21 @@ export async function onRequest(context) {
     if (path === 'admin/login') {
       if (request.method !== 'POST') return json({ error: '请用 POST' }, 405);
       if (!env.ADMIN_PASSWORD) {
-        return json({ error: '还没设置管理员密码：请在 Pages 项目 Settings → Environment variables 里加一个 ADMIN_PASSWORD，然后重新部署' }, 500);
+        return json({ error: '还没设置管理员密码：Settings → Variables and secrets 加 ADMIN_PASSWORD，然后重新部署' }, 500);
       }
+      const lock = await lockedMinutes(env, 'login:' + ip);
+      if (lock > 0) return json({ error: '试太多次了，请等 ' + lock + ' 分钟再试' }, 429);
+
       const body = await request.json().catch(() => ({}));
-      if (String(body.password || '') !== env.ADMIN_PASSWORD) return json({ error: '密码不对' }, 401);
+      if (String(body.password || '') !== env.ADMIN_PASSWORD) {
+        await addFail(env, 'login:' + ip, LOGIN_MAX_FAILS);
+        return json({ error: '密码不对' }, 401);
+      }
+      await clearFails(env, 'login:' + ip);
       return json({ ok: true });
     }
 
-    /* ---- 管理：以下都要密码 ---- */
+    /* ---- 管理：其余都要密码 ---- */
     if (path.indexOf('admin/') === 0) {
       if (!isAdmin(env, request)) return json({ error: '没有权限，请重新登录' }, 401);
       const cfg = await getConfig(env);
@@ -629,30 +725,35 @@ export async function onRequest(context) {
         await saveConfig(env, next);
         return json({ ok: true, config: next });
       }
-
-      if (path === 'admin/board') {
-        return json(await loadBoard(env, cfg, url.searchParams.get('client') || ''));
-      }
-
+      if (path === 'admin/board') return json(await loadBoard(env, cfg, null, ''));
       if (path === 'admin/cell') {
         return json(await adminCell(env, cfg, url.searchParams.get('date') || '', url.searchParams.get('slotId') || ''));
       }
+      if (path === 'admin/roster') return json(await adminRoster(env));
 
-      if (path === 'admin/rename' || path === 'admin/resetrenames') {
-        if (request.method !== 'POST') return json({ error: '请用 POST' }, 405);
-        const body = await request.json().catch(() => ({}));
-        const out = path === 'admin/rename'
-          ? await adminRename(env, cfg, body)
-          : await adminResetRenames(env, body);
-        return json(out, out.error ? 400 : 200);
+      if (path === 'admin/export') {
+        const out = await adminExport(env, cfg, url.searchParams.get('week') === '1' ? 1 : 0);
+        return new Response(out.csv, {
+          status: 200,
+          headers: {
+            'content-type': 'text/csv; charset=utf-8',
+            'content-disposition': 'attachment; filename="' + out.filename + '"',
+            'cache-control': 'no-store'
+          }
+        });
       }
 
-      if (path === 'admin/sign' || path === 'admin/remove') {
-        if (request.method !== 'POST') return json({ error: '请用 POST' }, 405);
+      if (request.method === 'POST') {
         const body = await request.json().catch(() => ({}));
-        const out = path === 'admin/sign'
-          ? await adminSign(env, cfg, body)
-          : await adminRemove(env, cfg, body);
+        let out;
+        if (path === 'admin/sign') out = await adminSign(env, cfg, body);
+        else if (path === 'admin/remove') out = await adminRemove(env, cfg, body);
+        else if (path === 'admin/roster/add') out = await adminRosterAdd(env, body);
+        else if (path === 'admin/roster/rotate') out = await adminRosterRotate(env, body);
+        else if (path === 'admin/roster/remove') out = await adminRosterRemove(env, body);
+        else if (path === 'admin/roster/restore') out = await adminRosterRestore(env, body);
+        else if (path === 'admin/rename') out = await adminRename(env, body);
+        else return json({ error: '接口不存在' }, 404);
         return json(out, out.error ? 400 : 200);
       }
 
@@ -662,26 +763,36 @@ export async function onRequest(context) {
     /* ---- 会员 ---- */
     const cfg = await getConfig(env);
 
-    if (path === 'board') {
-      return json(await loadBoard(
-        env,
-        cfg,
-        url.searchParams.get('client') || '',
-        url.searchParams.get('nick') || ''
-      ));
+    const code = normCode(url.searchParams.get('k'));
+    let who = null;
+    if (code) {
+      const lock = await lockedMinutes(env, 'code:' + ip);
+      if (lock > 0) return json({ error: '输错太多次了，请等 ' + lock + ' 分钟再试', needCode: true }, 429);
+
+      who = await rosterByCode(env, code);
+      if (!who) {
+        await addFail(env, 'code:' + ip, CODE_MAX_FAILS);
+        return json({ error: '入场码不对，请检查后重新输入', needCode: true }, 401);
+      }
+      await clearFails(env, 'code:' + ip);
+      if (who.disabled) {
+        return json({ error: '你的入场码已失效，请联系群主', needCode: true }, 403);
+      }
     }
 
-    if (path === 'myname') {
-      if (request.method !== 'POST') return json({ error: '请用 POST' }, 405);
-      const body = await request.json().catch(() => ({}));
-      const out = await setName(env, body);
-      return json(out, out.error ? 400 : 200);
+    if (path === 'board') {
+      if (!who) return json({ error: '需要入场码', needCode: true }, 401);
+      await touchDevice(env, who.code, url.searchParams.get('client') || '');
+      return json(await loadBoard(env, cfg, who, url.searchParams.get('client') || ''));
     }
 
     if (path === 'signup' || path === 'cancel') {
       if (request.method !== 'POST') return json({ error: '请用 POST' }, 405);
+      if (!who) return json({ error: '需要入场码', needCode: true }, 401);
       const body = await request.json().catch(() => ({}));
-      const out = path === 'signup' ? await doSignup(env, cfg, body) : await doCancel(env, cfg, body);
+      const out = path === 'signup'
+        ? await doSignup(env, cfg, who, body)
+        : await doCancel(env, cfg, who, body);
       return json(out, out.error ? 400 : 200);
     }
 
