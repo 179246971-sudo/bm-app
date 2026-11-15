@@ -116,7 +116,11 @@ function render() {
   showApp();
   $('#title').textContent = d.title || 'Hihi Studio';
   $('#sub').textContent = d.subtitle || '';
-  $('#me').textContent = d.myName ? ('我是 ' + d.myName) : '';
+  const meEl = $('#me');
+  if (meEl) {
+    if (d.myName) { meEl.textContent = '我是 ' + d.myName; meEl.hidden = false; }
+    else { meEl.hidden = true; }
+  }
 
   const statsBox = $('#stats');
   if (statsBox) {

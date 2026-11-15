@@ -48,8 +48,13 @@
   <!-- 主界面 -->
   <div id="appView" hidden>
     <header class="hd">
-      <h1 id="title">Hihi Studio</h1>
-      <p class="sub" id="sub"></p>
+      <div class="hd-top">
+        <div class="hd-l">
+          <h1 id="title">Hihi Studio</h1>
+          <p class="sub" id="sub"></p>
+        </div>
+        <span class="me-badge" id="me" hidden></span>
+      </div>
 
       <div class="stats" id="stats" hidden>
         <div class="stat"><span>本周已报</span><b id="statWeek">0</b><em>次</em></div>
@@ -61,10 +66,6 @@
     <main id="board">
       <div class="loading">加载中…</div>
     </main>
-
-    <footer class="ft">
-      <span id="me"></span>
-    </footer>
   </div>
 
   <!-- 弹窗 -->
