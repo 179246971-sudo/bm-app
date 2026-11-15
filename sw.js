@@ -19,3 +19,4 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', () => {
   // 空处理器：一律走网络，不拦截、不缓存
 });
+
