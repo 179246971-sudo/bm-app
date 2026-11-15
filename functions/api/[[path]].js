@@ -517,7 +517,8 @@ async function adminRemove(env, cfg, body) {
 
 async function adminRoster(env) {
   const rs = await env.DB.prepare(
-    'SELECT nick, code, disabled, created_at, last_seen FROM roster ORDER BY created_at'
+    'SELECT nick, code, disabled, created_at, last_seen FROM roster ' +
+    'ORDER BY disabled ASC, created_at DESC'
   ).all();
 
   const dev = await env.DB.prepare('SELECT code, COUNT(*) AS n FROM roster_devices GROUP BY code').all();
