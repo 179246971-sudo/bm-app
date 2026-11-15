@@ -32,6 +32,7 @@
       <nav class="tabs">
         <button class="tab on" data-tab="manage">报名管理</button>
         <button class="tab" data-tab="schedule">课表设置</button>
+        <button class="tab" data-tab="roster">名单</button>
       </nav>
 
       <!-- 报名管理 -->
@@ -81,6 +82,30 @@
 
         <button id="saveBtn" class="btn primary">保存设置</button>
         <div class="hint" id="saveHint"></div>
+      </div>
+
+      <!-- 名单 -->
+      <div id="tab-roster" hidden>
+        <p class="tip">只有名单里的人、并且拿着对应入场码，才能进来看课表和报名。链接转发给别人也进不来。</p>
+
+        <div class="fld">
+          <label>批量添加（一行一个名字，也可以整列粘贴）</label>
+          <textarea id="rosterInput" class="inp roster-ta" rows="5"
+                    placeholder="小林&#10;阿May&#10;陈工"></textarea>
+          <button id="rosterAdd" class="btn primary small">加入名单并生成入场码</button>
+          <div class="hint" id="rosterHint"></div>
+        </div>
+
+        <div class="fld">
+          <label>名单（共 <b id="rosterCount">0</b> 人，已入场 <b id="rosterIn">0</b> 人）</label>
+          <div id="rosterList" class="roster-list"><div class="loading">加载中…</div></div>
+        </div>
+
+        <div class="fld">
+          <label>导出名单（Excel 能直接打开）</label>
+          <button id="exportThis" class="btn small" type="button">导出本周</button>
+          <button id="exportNext" class="btn small" type="button">导出下周</button>
+        </div>
       </div>
     </section>
   </main>

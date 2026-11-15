@@ -1,18 +1,17 @@
-/* 报名工具 · 会员页 */
+/* 报名工具 · 会员页（白名单入场版） */
 
 const API = '/api';
 
 const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 忽略 */ } }
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 忽略 */ } },
+  del(k) { try { localStorage.removeItem(k); } catch (e) { /* 忽略 */ } }
 };
 
 const state = {
+  code: '',
   data: null,
   clientId: store.get('bm_client_id'),
-  nickname: store.get('bm_nickname'),
-  renamesLeft: 1,
-  renamesMax: 1,
   timer: null
 };
 
@@ -20,6 +19,17 @@ if (!state.clientId) {
   state.clientId = 'c' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   store.set('bm_client_id', state.clientId);
 }
+
+/* 链接里带 ?k=码 时，直接进场并从地址栏抹掉 */
+(function readCodeFromUrl() {
+  const q = new URLSearchParams(location.search);
+  const raw = (q.get('k') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (raw) {
+    store.set('bm_code', raw);
+    try { history.replaceState(null, '', location.pathname); } catch (e) { /* 忽略 */ }
+  }
+  state.code = raw || store.get('bm_code');
+})();
 
 const $ = (s) => document.querySelector(s);
 const esc = Grid.esc;
@@ -36,8 +46,65 @@ async function api(path, body) {
   const r = await fetch(API + path, opt);
   let j = {};
   try { j = await r.json(); } catch (e) { /* ignore */ }
-  if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+  if (!r.ok || j.error) {
+    const err = new Error(j.error || ('HTTP ' + r.status));
+    err.needCode = !!j.needCode;
+    err.status = r.status;
+    throw err;
+  }
   return j;
+}
+
+function withCode(path, sep) {
+  return path + (sep || '?') + 'k=' + encodeURIComponent(state.code) +
+         '&client=' + encodeURIComponent(state.clientId);
+}
+
+/* ---------------- 入场页 ---------------- */
+
+function showEntry(msg) {
+  $('#appView').hidden = true;
+  $('#entry').hidden = false;
+  $('#entryErr').textContent = msg || '';
+  state.data = null;
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  setTimeout(() => { try { $('#codeInput').focus(); } catch (e) { /* 忽略 */ } }, 200);
+}
+
+function showApp() {
+  $('#entry').hidden = true;
+  $('#appView').hidden = false;
+}
+
+async function tryCode() {
+  const raw = ($('#codeInput').value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (raw.length < 4) {
+    $('#entryErr').textContent = '入场码是 6 位字母数字';
+    return;
+  }
+
+  $('#codeBtn').disabled = true;
+  $('#codeBtn').textContent = '正在进入…';
+  $('#entryErr').textContent = '';
+
+  const back = state.code;
+  state.code = raw;
+
+  try {
+    const d = await api('/board?k=' + encodeURIComponent(raw) +
+                        '&client=' + encodeURIComponent(state.clientId));
+    store.set('bm_code', raw);
+    showApp();
+    state.data = d;
+    render();
+    startPolling();
+  } catch (e) {
+    state.code = back;
+    $('#entryErr').textContent = e.needCode ? e.message : ('进不去：' + e.message);
+  } finally {
+    $('#codeBtn').disabled = false;
+    $('#codeBtn').textContent = '进 入';
+  }
 }
 
 /* ---------------- 渲染 ---------------- */
@@ -46,11 +113,11 @@ function render() {
   const d = state.data;
   if (!d) return;
 
+  showApp();
   $('#title').textContent = d.title || 'Hihi Studio';
   $('#sub').textContent = d.subtitle || '';
+  $('#me').textContent = d.myName ? ('我是 ' + d.myName) : '';
 
-  // 本周 / 本月各报了几次
-  // 后台关掉统计时 stats 为 null，整块不显示
   const statsBox = $('#stats');
   if (statsBox) {
     if (d.stats) {
@@ -61,32 +128,6 @@ function render() {
       statsBox.hidden = false;
     } else {
       statsBox.hidden = true;
-    }
-  }
-  $('#me').textContent = state.nickname ? ('我是 ' + state.nickname) : '还没设置昵称';
-
-  const rn = $('#rename');
-  if (rn) {
-    if (state.renamesLeft > 0) {
-      rn.textContent = '改昵称 · 剩 ' + state.renamesLeft + ' 次';
-      rn.style.opacity = '';
-    } else {
-      rn.textContent = '改名次数已用完';
-      rn.style.opacity = '.55';
-    }
-  }
-
-  // 改昵称旁边的提示
-  const hint = $('#renameHint');
-  if (hint) {
-    if (state.renamesLeft > 0) {
-      hint.textContent = state.nickname
-        ? ('昵称建好后只能改 ' + state.renamesMax + ' 次，想清楚再定')
-        : ('先起个名字，之后只能改 ' + state.renamesMax + ' 次');
-      hint.dataset.warn = '';
-    } else {
-      hint.textContent = '改名次数已用完，要改请找群主';
-      hint.dataset.warn = '1';
     }
   }
 
@@ -106,6 +147,7 @@ function closeDialog() {
 function openDialog(day, cell) {
   closeDialog();
 
+  const d = state.data;
   const dlg = $('#dialog');
   const names = (cell.names || []).map(esc).join('、');
   const where = day.weekday + ' ' + day.md + ' · ' + cell.time;
@@ -119,6 +161,8 @@ function openDialog(day, cell) {
 
   let note = '';
   let btns = '';
+  const maxDay = d ? d.maxPerDay : 2;
+  const usedToday = day.myCountToday || 0;
 
   if (day.past) {
     note = '<div class="dlg-note mute">这一天已经过去，只能查看。</div>';
@@ -132,7 +176,7 @@ function openDialog(day, cell) {
       btns = '<button class="btn" data-act="close">再想想</button>' +
         '<button class="btn danger" data-act="cancel">确认取消</button>';
     } else {
-      note = '<div class="dlg-note mute">报名已超过 ' + (state.data.cancelMin || 3) + ' 分钟，不能取消了。</div>';
+      note = '<div class="dlg-note mute">报名已超过 ' + d.cancelMin + ' 分钟，不能取消了。</div>';
       btns = '<button class="btn" data-act="close">知道了</button>';
     }
   } else if (!cell.open) {
@@ -141,8 +185,13 @@ function openDialog(day, cell) {
   } else if (cell.full) {
     note = '<div class="dlg-note">名额已满。</div>';
     btns = '<button class="btn" data-act="close">知道了</button>';
+  } else if (usedToday >= maxDay) {
+    note = '<div class="dlg-note">这一天你已经报了 ' + usedToday + ' 节，最多 ' + maxDay +
+           ' 节。<br>还想加课请找群主。</div>';
+    btns = '<button class="btn" data-act="close">知道了</button>';
   } else {
-    note = '<div class="dlg-note mute">报名后 ' + (state.data.cancelMin || 3) + ' 分钟内可以取消，超过就退不掉了。</div>';
+    note = '<div class="dlg-note mute">报名后 ' + d.cancelMin + ' 分钟内可以取消。<br>' +
+           '这一天你还能报 ' + (maxDay - usedToday) + ' 节。</div>';
     btns = '<button class="btn" data-act="close">否</button>' +
       '<button class="btn primary" data-act="signup">确认报名</button>';
   }
@@ -183,134 +232,94 @@ function openDialog(day, cell) {
 
 /* ---------------- 报名 / 取消 ---------------- */
 
-async function changeName() {
-  if (state.renamesLeft <= 0) {
-    alert('改名次数已用完（只能改 ' + state.renamesMax + ' 次）。\n要改的话找群主，让他在后台帮你改。');
-    return null;
-  }
-
-  const v = prompt(
-    '你叫什么？（群里能认出来的名字，12 字以内）\n\n' +
-    '还有 ' + state.renamesLeft + ' 次改名机会。\n' +
-    '改名后，你之前报的名会一起改成新名字，不会丢。',
-    state.nickname || ''
-  );
-  if (v == null) return null;
-
-  const n = v.trim().slice(0, 12);
-  if (!n) return null;
-  if (n === state.nickname) return state.nickname;
-
-  try {
-    const r = await api('/myname', { clientId: state.clientId, nickname: n });
-    state.nickname = r.nick;
-    if (typeof r.renamesLeft === 'number') state.renamesLeft = r.renamesLeft;
-    store.set('bm_nickname', r.nick);
-    return r.nick;
-  } catch (e) {
-    alert(e.message);
-    return null;
-  }
-}
-
 async function doSignup(day, cell) {
-  let nick = state.nickname;
-  if (!nick) {
-    nick = await changeName();
-    if (!nick) return;
-  }
   try {
-    await api('/signup', {
+    await api('/signup?k=' + encodeURIComponent(state.code), {
       date: day.date,
-      slotId: cell.periodId,
-      clientId: state.clientId,
-      nickname: nick
+      slotId: cell.periodId
     });
     closeDialog();
     await load();
   } catch (e) {
+    if (e.needCode) { showEntry('入场码失效了，请重新输入'); return; }
     alert('报名失败：' + e.message);
   }
 }
 
 async function doCancel(day, cell) {
   try {
-    await api('/cancel', {
+    await api('/cancel?k=' + encodeURIComponent(state.code), {
       date: day.date,
-      slotId: cell.periodId,
-      clientId: state.clientId,
-      nickname: state.nickname
+      slotId: cell.periodId
     });
     closeDialog();
     await load();
   } catch (e) {
+    if (e.needCode) { showEntry('入场码失效了，请重新输入'); return; }
     alert('取消失败：' + e.message);
   }
 }
 
-/* ---------------- 启动 ---------------- */
+/* ---------------- 加载 / 轮询 ---------------- */
 
 async function load() {
+  if (!state.code) { showEntry(); return; }
   try {
-    const d = await api('/board?client=' + encodeURIComponent(state.clientId) +
-      '&nick=' + encodeURIComponent(state.nickname || ''));
-
-    // 管理员在后台改过名字：自动跟过来，不用本人操作
-    if (d.myName && d.myName !== state.nickname && d.myName !== '') {
-      state.nickname = d.myName;
-      store.set('bm_nickname', d.myName);
-      if (typeof d.renamesLeft === 'number') state.renamesLeft = d.renamesLeft;
-      return load();
-    }
-
-    if (typeof d.renamesLeft === 'number') state.renamesLeft = d.renamesLeft;
-    if (typeof d.renamesMax === 'number') state.renamesMax = d.renamesMax;
+    const d = await api('/board?k=' + encodeURIComponent(state.code) +
+                        '&client=' + encodeURIComponent(state.clientId));
     state.data = d;
     render();
   } catch (e) {
-    $('#board').innerHTML = '<div class="err">加载失败：' + esc(e.message) + '</div>';
+    if (e.needCode) {
+      store.del('bm_code');
+      state.code = '';
+      showEntry(e.message);
+      return;
+    }
+    const b = $('#board');
+    if (b) b.innerHTML = '<div class="err">加载失败：' + esc(e.message) + '</div>';
   }
 }
+
+function startPolling() {
+  if (state.timer) clearInterval(state.timer);
+  state.timer = setInterval(() => {
+    if (document.visibilityState === 'visible') load();
+  }, 20000);
+}
+
+/* ---------------- 启动 ---------------- */
+
+$('#codeBtn').addEventListener('click', tryCode);
+$('#codeInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryCode(); });
+$('#codeInput').addEventListener('input', (e) => {
+  e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+});
 
 $('#mask').addEventListener('click', (e) => {
   if (e.target === $('#mask')) closeDialog();
 });
 
-$('#rename').addEventListener('click', async (e) => {
-  e.preventDefault();
-  const n = await changeName();
-  if (n) await load();
-});
-
-load();
-setInterval(load, 20000);
-
-/* ---------------- 加到桌面 / 回到前台自动刷新 ---------------- */
-
-// 从桌面图标点开、或从后台切回来时，重新拉一次，保证看到的是最新
+// 从桌面图标点开、或从后台切回来时刷新
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') load();
+  if (document.visibilityState === 'visible' && state.code) load();
 });
 
-// 注册 Service Worker：安卓 Chrome 需要它才会出现「安装到桌面」的提示。
-// 这个 SW 不缓存任何东西，所以不会出现「数据是旧的」。
+// 注册 Service Worker（安卓安装提示需要；不缓存任何东西）
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });
 }
 
-// 在微信里打开时不支持加到桌面，提示用户换浏览器
+// 微信里提示换浏览器（才能加桌面）
 (function wechatTip() {
   const bar = document.getElementById('tipbar');
   if (!bar) return;
-
   const inWeChat = /MicroMessenger/i.test(navigator.userAgent);
   const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
                      window.navigator.standalone === true;
-
   if (inWeChat && !standalone && !store.get('bm_tip_closed')) bar.hidden = false;
-
   const btn = document.getElementById('tipclose');
   if (btn) {
     btn.addEventListener('click', () => {
@@ -319,3 +328,5 @@ if ('serviceWorker' in navigator) {
     });
   }
 })();
+
+if (state.code) load(); else showEntry();

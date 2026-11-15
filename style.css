@@ -488,3 +488,98 @@ body.admin { padding-bottom: 24px; }
 .ft-l #renameHint[data-warn="1"] { color: var(--red); }
 .ft { align-items: center; }
 .ft > a { flex: none; font-size: 12.5px; }
+
+/* ---------- 入场页 ---------- */
+.entry {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px calc(48px + env(safe-area-inset-bottom));
+  background: #fff;
+  text-align: center;
+}
+.entry-mark {
+  width: 78px;
+  height: 78px;
+  border-radius: 23px;
+  background: linear-gradient(160deg, #2c3a50 0%, #131a24 100%);
+  color: #d8bc90;
+  font: italic 700 46px/78px Georgia, "Times New Roman", serif;
+  margin-bottom: 18px;
+}
+.entry-title { margin: 0 0 6px; font-size: 22px; letter-spacing: .3px; }
+.entry-sub { margin: 0 0 22px; font-size: 13.5px; color: var(--muted); }
+.entry-input {
+  width: 100%;
+  max-width: 300px;
+  padding: 15px 14px;
+  font-size: 23px;
+  letter-spacing: 6px;
+  text-align: center;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  text-transform: uppercase;
+  border: 2px solid var(--line);
+  border-radius: 14px;
+  background: #fbfcfe;
+  color: var(--txt);
+  -webkit-appearance: none;
+}
+.entry-input:focus {
+  outline: 0;
+  border-color: var(--brand);
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(43, 110, 246, .1);
+}
+.entry-btn { width: 100%; max-width: 300px; margin-top: 14px; padding: 15px; font-size: 16px; }
+.entry-err { min-height: 20px; margin: 12px 0 0; font-size: 12.5px; color: var(--red); }
+.entry-hint { margin: 18px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.75; }
+
+/* ---------- 后台：名单 ---------- */
+.roster-ta {
+  min-height: 104px;
+  resize: vertical;
+  line-height: 1.6;
+  font-family: inherit;
+}
+.roster-list {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.rrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.rrow:last-child { border-bottom: 0; }
+.rrow.is-off { background: #f7f8fa; }
+.rrow.is-off .rname { color: var(--muted); text-decoration: line-through; }
+.rname { font-weight: 600; min-width: 70px; }
+.rcode {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+  letter-spacing: 1.5px;
+  background: var(--brand-soft);
+  color: #1a4ad0;
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+.rmeta { color: var(--muted); font-size: 11.5px; flex: 1; min-width: 120px; }
+.racts { display: flex; gap: 6px; flex-wrap: wrap; }
+.racts .btn { padding: 5px 9px; font-size: 11.5px; border-radius: 8px; }
+.racts .warn { color: #b54708; background: #fff4e5; }
+.badge-warn {
+  font-style: normal;
+  font-size: 10.5px;
+  color: #b54708;
+  background: #fff4e5;
+  border-radius: 6px;
+  padding: 1px 6px;
+}

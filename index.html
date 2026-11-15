@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -21,34 +21,51 @@
 </head>
 <body>
 
-  <!-- 微信里打开时的提示条（要用浏览器打开才能加到桌面） -->
+  <!-- 微信里打开时的提示条 -->
   <div class="tipbar" id="tipbar" hidden>
-    <span>要加到手机桌面？点右上角 <b>⋯</b> → <b>在浏览器打开</b>，再用浏览器菜单添加</span>
-    <button type="button" id="tipclose" aria-label="关闭">×</button>
+    <span>要加到手机桌面？点右上角 <b>&#8943;</b> &rarr; <b>在浏览器打开</b>，再用浏览器菜单添加</span>
+    <button type="button" id="tipclose" aria-label="关闭">&times;</button>
   </div>
 
-  <header class="hd">
-    <h1 id="title">Hihi Studio</h1>
-    <p class="sub" id="sub"></p>
+  <!-- 入场页 -->
+  <section class="entry" id="entry" hidden>
+    <div class="entry-mark">h</div>
+    <h1 class="entry-title">Hihi Studio</h1>
+    <p class="entry-sub">请输入你的入场码</p>
 
-    <div class="stats" id="stats" hidden>
-      <div class="stat"><span>本周已报</span><b id="statWeek">0</b><em>次</em></div>
-      <div class="stat"><span>本月已报</span><b id="statMonth">0</b><em>次</em></div>
-      <div class="stat"><span>今年已报</span><b id="statYear">0</b><em>次</em></div>
-    </div>
-  </header>
+    <input id="codeInput" class="entry-input" type="text"
+           inputmode="latin" autocapitalize="characters" autocomplete="off"
+           autocorrect="off" spellcheck="false" maxlength="8"
+           placeholder="6 位字母或数字">
 
-  <main id="board">
-    <div class="loading">加载中…</div>
-  </main>
+    <button id="codeBtn" class="btn primary entry-btn" type="button">进 入</button>
 
-  <footer class="ft">
-    <div class="ft-l">
+    <p class="entry-err" id="entryErr"></p>
+
+    <p class="entry-hint">入场码是群主单独发给你的。<br>没收到、或者输不进去，请在群里问一下。</p>
+  </section>
+
+  <!-- 主界面 -->
+  <div id="appView" hidden>
+    <header class="hd">
+      <h1 id="title">Hihi Studio</h1>
+      <p class="sub" id="sub"></p>
+
+      <div class="stats" id="stats" hidden>
+        <div class="stat"><span>本周已报</span><b id="statWeek">0</b><em>次</em></div>
+        <div class="stat"><span>本月已报</span><b id="statMonth">0</b><em>次</em></div>
+        <div class="stat"><span>今年已报</span><b id="statYear">0</b><em>次</em></div>
+      </div>
+    </header>
+
+    <main id="board">
+      <div class="loading">加载中…</div>
+    </main>
+
+    <footer class="ft">
       <span id="me"></span>
-      <em id="renameHint">昵称建好后只能改 1 次</em>
-    </div>
-    <a href="javascript:;" id="rename">改昵称</a>
-  </footer>
+    </footer>
+  </div>
 
   <!-- 弹窗 -->
   <div class="mask" id="mask" hidden>
