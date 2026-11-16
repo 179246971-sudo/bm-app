@@ -34,6 +34,9 @@ const DEFAULTS = {
   maxPerDay: 2,
   showStats: true,
   slotMinutes: 60,
+  cancelBeforeHour: 21,     // 开课前一天的这个钟点之后，不能自己取消
+  maxPerWeek: 6,            // 每人每个自然周最多报几节
+  cancelQuota: 2,           // 每人每个自然周最多能取消几次
   days: defaultDays()
 };
 
@@ -169,6 +172,9 @@ function normalizeConfig(raw) {
     maxPerDay: intIn(c.maxPerDay, 1, 20, 2),
     showStats: c.showStats !== false,
     slotMinutes: intIn(c.slotMinutes, 15, 300, 60),
+    cancelBeforeHour: intIn(c.cancelBeforeHour, 0, 23, 21),
+    maxPerWeek: intIn(c.maxPerWeek, 1, 60, 6),
+    cancelQuota: intIn(c.cancelQuota, 0, 20, 2),
     days
   };
 }
@@ -186,6 +192,140 @@ async function saveConfig(env, cfg) {
     'INSERT INTO config (key, value) VALUES (?1, ?2) ' +
     'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
   ).bind('schedule', JSON.stringify(cfg)).run();
+}
+
+/* ==================== 次卡：余额 / 流水 ==================== */
+
+function weekStartOf(dateStr) {
+  const p = parseYmd(dateStr);
+  if (!p) return null;
+  const back = (p.dow + 6) % 7;
+  return ymd(bjParts(bjEpoch(p.y, p.m, p.d, 0, 0) - back * 86400000));
+}
+
+function cancelCutoff(p, cfg) {
+  // 开课前一天 cfg.cancelBeforeHour 点（北京时间）
+  return bjEpoch(p.y, p.m, p.d, 0, 0) - 86400000 + cfg.cancelBeforeHour * 3600000;
+}
+
+async function getCredits(env, nick) {
+  try {
+    const r = await env.DB.prepare('SELECT credits FROM wallets WHERE nick = ?1').bind(nick).first();
+    return r ? r.credits : 0;
+  } catch (e) { return 0; }
+}
+
+async function dbAdd(env, nick, delta, kind, amount, note) {
+  try {
+    await env.DB.prepare('INSERT OR IGNORE INTO wallets (nick, credits) VALUES (?1, 0)').bind(nick).run();
+  } catch (e) { /* 忽略 */ }
+  await env.DB.prepare('UPDATE wallets SET credits = credits + ?1 WHERE nick = ?2').bind(delta, nick).run();
+  const after = await getCredits(env, nick);
+  try {
+    await env.DB.prepare(
+      'INSERT INTO wallet_log (nick, delta, kind, amount, note, balance_after, created_at) ' +
+      'VALUES (?1,?2,?3,?4,?5,?6,?7)'
+    ).bind(nick, delta, kind, amount === undefined ? null : amount, note || '', after, Date.now()).run();
+  } catch (e) { /* 忽略 */ }
+  return after;
+}
+
+async function countSignups(env, nick) {
+  try {
+    const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM signups WHERE nickname = ?1').bind(nick).first();
+    return r ? r.n : 0;
+  } catch (e) { return 0; }
+}
+
+async function countConsumptions(env, nick) {
+  try {
+    const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM consumptions WHERE nick = ?1').bind(nick).first();
+    return r ? r.n : 0;
+  } catch (e) { return 0; }
+}
+
+async function weekSignupCount(env, nick, weekStart) {
+  const p = parseYmd(weekStart);
+  if (!p) return 0;
+  const end = ymd(bjParts(bjEpoch(p.y, p.m, p.d, 0, 0) + 6 * 86400000));
+  try {
+    const r = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM signups WHERE nickname = ?1 AND slot_date >= ?2 AND slot_date <= ?3'
+    ).bind(nick, weekStart, end).first();
+    return r ? r.n : 0;
+  } catch (e) { return 0; }
+}
+
+async function weekLimitOf(env, cfg, nick, weekStart) {
+  if (!nick) return cfg.maxPerWeek;
+  try {
+    const r = await env.DB.prepare(
+      'SELECT limits FROM week_limits WHERE nick = ?1 AND week_start = ?2'
+    ).bind(nick, weekStart).first();
+    if (r && r.limits > 0) return r.limits;
+  } catch (e) { /* 忽略 */ }
+  return cfg.maxPerWeek;
+}
+
+async function cancelCount(env, nick, weekStart) {
+  if (!nick) return 0;
+  try {
+    const r = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM cancel_log WHERE nick = ?1 AND week_start = ?2'
+    ).bind(nick, weekStart).first();
+    return r ? r.n : 0;
+  } catch (e) { return 0; }
+}
+
+/**
+ * 惰性结算：把「已经开课、有报名、还没记账」的课补记成消费。
+ * 不需要定时任务——任何人打开页面就会补上；唯一键保证不会重复扣。
+ */
+async function settle(env, cfg) {
+  const now = Date.now();
+  const todayStr = ymd(bjParts(now));
+  const from = ymd(bjParts(now - 60 * 86400000));
+
+  let rows;
+  try {
+    rows = await env.DB.prepare(
+      'SELECT slot_date, slot_id, nickname FROM signups WHERE slot_date >= ?1 AND slot_date <= ?2'
+    ).bind(from, todayStr).all();
+  } catch (e) { return; }
+
+  const list = rows.results || [];
+  if (!list.length) return;
+
+  for (const r of list) {
+    const p = parseYmd(r.slot_date);
+    if (!p) continue;
+
+    const arr = slotsOf(cfg, p.dow);
+    let slot = null;
+    for (const x of arr) if (x.id === r.slot_id) { slot = x; break; }
+    if (!slot) continue;
+
+    const cc = resolveCell(p, slot, cfg);
+    if (!cc || cc.off) continue;          // 停课的不扣
+    if (now < cc.startEpoch) continue;    // 还没开课
+
+    let dup = null;
+    try {
+      dup = await env.DB.prepare(
+        'SELECT 1 AS x FROM consumptions WHERE nick = ?1 AND slot_date = ?2 AND slot_id = ?3'
+      ).bind(r.nickname, r.slot_date, r.slot_id).first();
+    } catch (e) { return; }
+    if (dup) continue;
+
+    try {
+      await env.DB.prepare(
+        'INSERT INTO consumptions (nick, slot_date, slot_id, created_at, refunded) VALUES (?1,?2,?3,?4,0)'
+      ).bind(r.nickname, r.slot_date, r.slot_id, cc.startEpoch).run();
+    } catch (e) { continue; }
+
+    await dbAdd(env, r.nickname, -1, 'consume', null,
+      '上课扣次 ' + r.slot_date + ' ' + slot.start);
+  }
 }
 
 /* ==================== 格子 ==================== */
@@ -338,6 +478,7 @@ async function clearFails(env, key) {
 /* ==================== 看板 ==================== */
 
 async function loadBoard(env, cfg, who, clientId) {
+  await settle(env, cfg);
   const now = Date.now();
   const t = bjParts(now);
   const todayStr = ymd(t);
@@ -402,9 +543,33 @@ async function loadBoard(env, cfg, who, clientId) {
 
   const cancelMs = cfg.cancelMin * 60000;
 
+  let wallet = null;
+  if (myName) {
+    const credits = await getCredits(env, myName);
+    const totalSign = await countSignups(env, myName);
+    const consumed = await countConsumptions(env, myName);
+    const pending = Math.max(0, totalSign - consumed);
+    wallet = { credits, pending, available: credits - pending };
+  }
+
+  const wkInfo = [];
+  for (let w = 0; w < 2; w++) {
+    const ws = weeks[w][0].date;
+    wkInfo.push({
+      cancelUsed: await cancelCount(env, myName, ws),
+      cancelQuota: cfg.cancelQuota,
+      signupUsed: await weekSignupCount(env, myName, ws),
+      signupLimit: await weekLimitOf(env, cfg, myName, ws)
+    });
+  }
+
   const outWeeks = weeks.map((days, wi) => ({
     label: wi === 0 ? '本周' : '下周',
     range: mdText(days[0].p) + '-' + mdText(days[6].p),
+    cancelUsed: wkInfo[wi].cancelUsed,
+    cancelQuota: wkInfo[wi].cancelQuota,
+    signupUsed: wkInfo[wi].signupUsed,
+    signupLimit: wkInfo[wi].signupLimit,
     days: days.map(({ date, p }) => {
       const past = date < todayStr;
       const isToday = date === todayStr;
@@ -420,6 +585,18 @@ async function loadBoard(env, cfg, who, clientId) {
         const mineRow = myName ? (list.find((x) => x.nickname === myName) || null) : null;
         const count = list.length;
 
+        // 能不能取消：没开课 + 没过截止 + 本周额度没用完
+        const cutoff = cancelCutoff(p, cfg);
+        const wkQuotaLeft = cfg.cancelQuota - wkInfo[wi].cancelUsed;
+        let canCancel = false;
+        let cancelWhy = '';
+        if (mineRow) {
+          if (now >= cc.startEpoch) cancelWhy = '已经开课了';
+          else if (now >= cutoff) cancelWhy = '已过取消截止（' + mdText(bjParts(cc.startEpoch - 86400000)) + ' ' + cfg.cancelBeforeHour + ':00）';
+          else if (wkQuotaLeft <= 0) cancelWhy = '这一周取消次数已用完（' + wkInfo[wi].cancelUsed + '/' + cfg.cancelQuota + '）';
+          else canCancel = true;
+        }
+
         cells.push({
           row: i,
           periodId: slot.id,
@@ -433,8 +610,10 @@ async function loadBoard(env, cfg, who, clientId) {
           off: cc.off,
           open: !cc.off && !past && now < cc.startEpoch,
           mine: !!mineRow,
-          canCancel: !!mineRow && now - mineRow.created_at <= cancelMs,
-          cancelLeft: mineRow ? Math.max(0, cancelMs - (now - mineRow.created_at)) : 0,
+          canCancel,
+          cancelWhy,
+          cancelLeft: Math.max(0, wkQuotaLeft),
+          cancelByText: mdText(bjParts(cc.startEpoch - 86400000)) + ' ' + cfg.cancelBeforeHour + ':00',
           names: list.map((x) => x.nickname)
         });
       }
@@ -458,11 +637,108 @@ async function loadBoard(env, cfg, who, clientId) {
     cancelMin: cfg.cancelMin,
     maxPerDay: cfg.maxPerDay,
     slotMinutes: cfg.slotMinutes,
+    cancelBeforeHour: cfg.cancelBeforeHour,
+    cancelQuota: cfg.cancelQuota,
+    maxPerWeek: cfg.maxPerWeek,
+    wallet,
     stats,
     myName,
     rows,
     rowStd: std,
     weeks: outWeeks
+  };
+}
+
+/* ==================== 会员：我的档案 ==================== */
+
+async function memberProfile(env, cfg, who) {
+  const now = Date.now();
+  const t = bjParts(now);
+  const backToMon = (t.dow + 6) % 7;
+  const monday = bjEpoch(t.y, t.m, t.d, 0, 0) - backToMon * 86400000;
+
+  const wStart = ymd(bjParts(monday));
+  const wEnd = ymd(bjParts(monday + 6 * 86400000));
+  const nStart = ymd(bjParts(monday + 7 * 86400000));
+  const nEnd = ymd(bjParts(monday + 13 * 86400000));
+
+  const mStart = t.y + '-' + String(t.m).padStart(2, '0') + '-01';
+  const mLast = new Date(Date.UTC(t.y, t.m, 0)).getUTCDate();
+  const mEnd = t.y + '-' + String(t.m).padStart(2, '0') + '-' + String(mLast).padStart(2, '0');
+  const yStart = t.y + '-01-01';
+  const yEnd = t.y + '-12-31';
+
+  const credits = await getCredits(env, who.nick);
+  const totalSign = await countSignups(env, who.nick);
+  const consumedN = await countConsumptions(env, who.nick);
+  const pending = Math.max(0, totalSign - consumedN);
+
+  let rows = [];
+  try {
+    const r = await env.DB.prepare(
+      'SELECT slot_date, slot_id FROM signups WHERE nickname = ?1 ORDER BY slot_date'
+    ).bind(who.nick).all();
+    rows = r.results || [];
+  } catch (e) { /* 忽略 */ }
+
+  let weekN = 0, monthN = 0, yearN = 0;
+  const upcoming = [];
+
+  for (const r of rows) {
+    const ps = parseYmd(r.slot_date);
+    if (!ps) continue;
+    let slot = null;
+    for (const x of slotsOf(cfg, ps.dow)) if (x.id === r.slot_id) { slot = x; break; }
+    if (!slot) continue;
+    const cc = resolveCell(ps, slot, cfg);
+    if (!cc) continue;
+
+    const d = r.slot_date;
+    if (d >= wStart && d <= wEnd) weekN++;
+    if (d >= mStart && d <= mEnd) monthN++;
+    if (d >= yStart && d <= yEnd) yearN++;
+
+    if (cc.startEpoch > now) {
+      upcoming.push({
+        date: d, weekday: WEEK_CN[ps.dow], md: mdText(ps),
+        start: cc.start, end: cc.end
+      });
+    }
+  }
+
+  const log = [];
+  try {
+    const l = await env.DB.prepare(
+      'SELECT delta, kind, note, balance_after, created_at FROM wallet_log ' +
+      'WHERE nick = ?1 ORDER BY id DESC LIMIT 20'
+    ).bind(who.nick).all();
+    log.push.apply(log, l.results || []);
+  } catch (e) { /* 忽略 */ }
+
+  return {
+    nick: who.nick,
+    wallet: { credits, pending, available: credits - pending },
+    stats: { week: weekN, month: monthN, year: yearN },
+    weeks: [
+      {
+        label: '本周',
+        range: mdText(bjParts(monday)) + '-' + mdText(bjParts(monday + 6 * 86400000)),
+        cancelUsed: await cancelCount(env, who.nick, wStart),
+        cancelQuota: cfg.cancelQuota,
+        signupUsed: await weekSignupCount(env, who.nick, wStart),
+        signupLimit: await weekLimitOf(env, cfg, who.nick, wStart)
+      },
+      {
+        label: '下周',
+        range: mdText(bjParts(monday + 7 * 86400000)) + '-' + mdText(bjParts(monday + 13 * 86400000)),
+        cancelUsed: await cancelCount(env, who.nick, nStart),
+        cancelQuota: cfg.cancelQuota,
+        signupUsed: await weekSignupCount(env, who.nick, nStart),
+        signupLimit: await weekLimitOf(env, cfg, who.nick, nStart)
+      }
+    ],
+    upcoming: upcoming.slice(0, 6),
+    log
   };
 }
 
@@ -491,6 +767,19 @@ async function doSignup(env, cfg, who, body) {
     return { error: '这一天你已经报了 ' + used.n + ' 节，最多 ' + cfg.maxPerDay + ' 节。要加课请联系群主' };
   }
 
+  const ws = weekStartOf(date);
+  const wkLimit = await weekLimitOf(env, cfg, who.nick, ws);
+  const wkUsed = await weekSignupCount(env, who.nick, ws);
+  if (wkUsed >= wkLimit) {
+    return { error: '这一周你已经报了 ' + wkUsed + ' 节，上限 ' + wkLimit + ' 节。要加课请联系群主' };
+  }
+
+  const credits = await getCredits(env, who.nick);
+  const pending = Math.max(0, (await countSignups(env, who.nick)) - (await countConsumptions(env, who.nick)));
+  if (credits - pending < 1) {
+    return { error: '余额不够了（可用 ' + Math.max(0, credits - pending) + ' 次），请联系群主充值' };
+  }
+
   const sql =
     'INSERT INTO signups (slot_date, slot_id, nickname, created_at) ' +
     'SELECT ?1, ?2, ?3, ?4 ' +
@@ -516,15 +805,36 @@ async function doCancel(env, cfg, who, body) {
   ).bind(date, slotId, who.nick).first();
 
   if (!row) return { error: '你没有报名这个时段' };
-  if (Date.now() - row.created_at > cfg.cancelMin * 60000) {
-    return { error: '已超过 ' + cfg.cancelMin + ' 分钟，不能取消了' };
+
+  const p = parseYmd(date);
+  if (!p) return { error: '日期不对' };
+  const found = findSlot(cfg, p.dow, slotId);
+  if (!found) return { error: '没有这个时段' };
+
+  const cc = resolveCell(p, found.slot, cfg);
+  if (cc && Date.now() >= cc.startEpoch) return { error: '这个时段已经开始了，不能取消' };
+
+  if (cc && Date.now() >= cancelCutoff(p, cfg)) {
+    return { error: '已过取消截止时间（开课前一天 ' + cfg.cancelBeforeHour + ':00），请联系群主' };
+  }
+
+  const ws = weekStartOf(date);
+  const used = await cancelCount(env, who.nick, ws);
+  if (used >= cfg.cancelQuota) {
+    return { error: '这一周你已经取消了 ' + used + ' 次，最多 ' + cfg.cancelQuota + ' 次，请联系群主' };
   }
 
   await env.DB.prepare(
     'DELETE FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND nickname = ?3'
   ).bind(date, slotId, who.nick).run();
 
-  return { ok: true };
+  try {
+    await env.DB.prepare(
+      'INSERT INTO cancel_log (nick, slot_date, slot_id, week_start, created_at) VALUES (?1,?2,?3,?4,?5)'
+    ).bind(who.nick, date, slotId, ws, Date.now()).run();
+  } catch (e) { /* 忽略 */ }
+
+  return { ok: true, cancelLeft: cfg.cancelQuota - used - 1 };
 }
 
 /* ==================== 管理：格子 ==================== */
@@ -608,24 +918,166 @@ async function adminRemove(env, cfg, body) {
   const found = findSlot(cfg, p.dow, slotId);
   if (!found) return { error: '没有这个时段' };
 
-  const cc = resolveCell(p, found.slot, cfg);
-  if (Date.now() >= cc.startEpoch) return { error: '这个时段已经开始了，不能改报名' };
+  // 管理员可以删已开课的报名（会员自己不能，只能找管理员）
+  // 已开课的那节如果扣过次，删的时候可选退还
+  // 先看这节是不是已经扣过次
+  let consumed = null;
+  try {
+    consumed = await env.DB.prepare(
+      'SELECT refunded FROM consumptions WHERE nick = ?1 AND slot_date = ?2 AND slot_id = ?3'
+    ).bind(nick, date, slotId).first();
+  } catch (e) { /* 忽略 */ }
 
   const res = await env.DB.prepare(
     'DELETE FROM signups WHERE slot_date = ?1 AND slot_id = ?2 AND nickname = ?3'
   ).bind(date, slotId, nick).run();
 
   if (!res.meta || !res.meta.changes) return { error: '没找到这条报名记录' };
-  return { ok: true };
+
+  let refunded = false;
+  if (consumed && !consumed.refunded && body && body.refund) {
+    try {
+      await env.DB.prepare(
+        'UPDATE consumptions SET refunded = 1 WHERE nick = ?1 AND slot_date = ?2 AND slot_id = ?3'
+      ).bind(nick, date, slotId).run();
+      await dbAdd(env, nick, 1, 'refund', null, '管理员删除已开课的报名，退还 1 次');
+      refunded = true;
+    } catch (e) { /* 忽略 */ }
+  }
+
+  return { ok: true, refunded, hadConsumed: !!consumed };
+}
+
+/* ==================== 管理：数据看板 ==================== */
+
+async function adminStats(env, cfg) {
+  const now = Date.now();
+  const t = bjParts(now);
+  const backToMon = (t.dow + 6) % 7;
+  const monday = bjEpoch(t.y, t.m, t.d, 0, 0) - backToMon * 86400000;
+  const wStart = ymd(bjParts(monday));
+  const wEnd = ymd(bjParts(monday + 6 * 86400000));
+
+  const cnt = new Map();
+  const peopleSet = new Set();
+  try {
+    const rs = await env.DB.prepare(
+      'SELECT slot_date, slot_id, nickname FROM signups WHERE slot_date >= ?1 AND slot_date <= ?2'
+    ).bind(wStart, wEnd).all();
+    for (const r of rs.results || []) {
+      const k = r.slot_date + '|' + r.slot_id;
+      cnt.set(k, (cnt.get(k) || 0) + 1);
+      peopleSet.add(r.nickname);
+    }
+  } catch (e) { /* 忽略 */ }
+
+  let capacity = 0, filled = 0, emptyCells = 0;
+  const cold = [];
+
+  for (let i = 0; i < 7; i++) {
+    const pd = bjParts(monday + i * 86400000);
+    const d = ymd(pd);
+    for (const slot of slotsOf(cfg, pd.dow)) {
+      const cc = resolveCell(pd, slot, cfg);
+      if (!cc || cc.off) continue;
+      capacity += cc.cap;
+      const n = cnt.get(d + '|' + slot.id) || 0;
+      filled += n;
+      if (n === 0) emptyCells++;
+      if (n <= 1) cold.push({ date: d, weekday: WEEK_CN[pd.dow], start: cc.start, n, cap: cc.cap });
+    }
+  }
+
+  const mFirstEpoch = bjEpoch(t.y, t.m, 1, 0, 0);
+  const mLastDay = new Date(Date.UTC(t.y, t.m, 0)).getUTCDate();
+  const mAfterEpoch = bjEpoch(t.y, t.m, mLastDay, 23, 59) + 120000;
+
+  let recharge = 0, consume = 0, refund = 0, adjust = 0;
+  try {
+    const lg = await env.DB.prepare(
+      'SELECT kind, SUM(delta) AS s FROM wallet_log WHERE created_at >= ?1 AND created_at < ?2 GROUP BY kind'
+    ).bind(mFirstEpoch, mAfterEpoch).all();
+    for (const x of lg.results || []) {
+      const v = x.s || 0;
+      if (x.kind === 'recharge') recharge += v;
+      else if (x.kind === 'consume') consume += -v;
+      else if (x.kind === 'refund') refund += -v;
+      else adjust += v;
+    }
+  } catch (e) { /* 忽略 */ }
+
+  let cancels = 0;
+  try {
+    const c = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM cancel_log WHERE created_at >= ?1 AND created_at < ?2'
+    ).bind(mFirstEpoch, mAfterEpoch).first();
+    cancels = c ? c.n : 0;
+  } catch (e) { /* 忽略 */ }
+
+  let active = [];
+  try {
+    const ro = await adminRoster(env);
+    active = ro.people.filter((x) => !x.disabled);
+  } catch (e) { /* 忽略 */ }
+
+  const withCredits = active.filter((x) => x.credits > 0).length;
+  const zero = active.filter((x) => x.credits <= 0).length;
+  const creditsTotal = active.reduce((n, x) => n + (x.credits || 0), 0);
+  const low = active.filter((x) => x.credits <= 2);
+
+  let idle = [];
+  try {
+    const last = await env.DB.prepare(
+      'SELECT nickname, MAX(slot_date) AS d FROM signups GROUP BY nickname'
+    ).all();
+    const m = new Map();
+    for (const x of last.results || []) m.set(x.nickname, x.d);
+    const cut = ymd(bjParts(now - 21 * 86400000));
+    idle = active.filter((x) => {
+      const d = m.get(x.nick);
+      return !d || d < cut;
+    });
+  } catch (e) { /* 忽略 */ }
+
+  return {
+    week: {
+      label: '本周',
+      range: mdText(bjParts(monday)) + '-' + mdText(bjParts(monday + 6 * 86400000)),
+      filled, capacity,
+      rate: capacity ? Math.round(filled / capacity * 100) : 0,
+      people: peopleSet.size,
+      emptyCells
+    },
+    month: {
+      label: t.y + ' 年 ' + t.m + ' 月',
+      recharge, consume, refund, adjust, cancels,
+      people: active.length, withCredits, zero, creditsTotal
+    },
+    alerts: {
+      low: low.slice(0, 8).map((x) => x.nick + ' ' + x.credits + '次'),
+      lowCount: low.length,
+      idle: idle.slice(0, 8).map((x) => x.nick),
+      idleCount: idle.length,
+      cold: cold.slice(0, 4)
+    }
+  };
 }
 
 /* ==================== 管理：名单 ==================== */
 
 async function adminRoster(env) {
-  const rs = await env.DB.prepare(
-    'SELECT nick, code, disabled, created_at, last_seen FROM roster ' +
-    'ORDER BY disabled ASC, created_at DESC'
-  ).all();
+  let rs;
+  try {
+    rs = await env.DB.prepare(
+      'SELECT nick, code, disabled, created_at, last_seen, phone, memo FROM roster ' +
+      'ORDER BY disabled ASC, created_at DESC'
+    ).all();
+  } catch (e) {
+    rs = await env.DB.prepare(
+      'SELECT nick, code, disabled, created_at, last_seen FROM roster ' +
+      'ORDER BY disabled ASC, created_at DESC'
+    ).all();
+  }
 
   const dev = await env.DB.prepare('SELECT code, COUNT(*) AS n FROM roster_devices GROUP BY code').all();
   const devMap = new Map();
@@ -635,6 +1087,12 @@ async function adminRoster(env) {
   const cntMap = new Map();
   for (const c of cnt.results || []) cntMap.set(c.nickname, c.n);
 
+  const credMap = new Map();
+  try {
+    const w = await env.DB.prepare('SELECT nick, credits FROM wallets').all();
+    for (const x of w.results || []) credMap.set(x.nick, x.credits);
+  } catch (e) { /* 忽略 */ }
+
   return {
     people: (rs.results || []).map((r) => ({
       nick: r.nick,
@@ -642,10 +1100,116 @@ async function adminRoster(env) {
       disabled: !!r.disabled,
       devices: devMap.get(r.code) || 0,
       signups: cntMap.get(r.nick) || 0,
+      credits: credMap.has(r.nick) ? credMap.get(r.nick) : 0,
+      phone: r.phone || '',
+      memo: r.memo || '',
       lastSeen: r.last_seen || 0,
       createdAt: r.created_at
     }))
   };
+}
+
+async function adminWallet(env, body) {
+  const nick = cleanName(body && body.nick);
+  const delta = parseInt(body && body.delta, 10);
+  if (!nick) return { error: '缺少名字' };
+  if (!Number.isFinite(delta) || delta === 0) return { error: '变动次数要填一个非零整数' };
+  if (Math.abs(delta) > 9999) return { error: '一次最多变动 9999 次' };
+
+  if (!(await rosterByNick(env, nick))) return { error: '名单里没有「' + nick + '」' };
+
+  const kind = String((body && body.kind) || 'adjust').slice(0, 12);
+  let amount = null;
+  if (body && body.amount !== undefined && body.amount !== '' && body.amount !== null) {
+    const n = parseInt(body.amount, 10);
+    if (Number.isFinite(n)) amount = n;
+  }
+  const note = String((body && body.note) || '').slice(0, 60);
+
+  const after = await dbAdd(env, nick, delta, kind, amount, note);
+  return { ok: true, credits: after };
+}
+
+async function adminCards(env) {
+  try {
+    const r = await env.DB.prepare(
+      'SELECT id, name, credits, price, active FROM cards ORDER BY credits ASC, id ASC'
+    ).all();
+    return { cards: r.results || [] };
+  } catch (e) {
+    return { cards: [] };
+  }
+}
+
+async function adminCardSave(env, body) {
+  const name = cleanName(body && body.name).slice(0, 20);
+  const credits = parseInt(body && body.credits, 10);
+  const priceRaw = parseInt(body && body.price, 10);
+  const id = parseInt(body && body.id, 10);
+
+  if (!name) return { error: '请填次卡名字' };
+  if (!Number.isFinite(credits) || credits < 1 || credits > 999) return { error: '次数要填 1~999' };
+  const price = Number.isFinite(priceRaw) && priceRaw >= 0 ? priceRaw : 0;
+
+  if (Number.isFinite(id) && id > 0) {
+    await env.DB.prepare('UPDATE cards SET name = ?1, credits = ?2, price = ?3 WHERE id = ?4')
+      .bind(name, credits, price, id).run();
+    return { ok: true, id };
+  }
+
+  await env.DB.prepare(
+    'INSERT INTO cards (name, credits, price, active, created_at) VALUES (?1,?2,?3,1,?4)'
+  ).bind(name, credits, price, Date.now()).run();
+
+  return { ok: true };
+}
+
+async function adminCardRemove(env, body) {
+  const id = parseInt(body && body.id, 10);
+  if (!Number.isFinite(id)) return { error: '缺少 id' };
+  await env.DB.prepare('DELETE FROM cards WHERE id = ?1').bind(id).run();
+  return { ok: true };
+}
+
+async function adminLimit(env, cfg, body) {
+  const nick = cleanName(body && body.nick);
+  if (!nick) return { error: '缺少名字' };
+  if (!(await rosterByNick(env, nick))) return { error: '名单里没有「' + nick + '」' };
+
+  const ws = String((body && body.weekStart) || '');
+  if (!parseYmd(ws)) return { error: '周次不对（要 2026-11-16 这种格式）' };
+
+  const limits = parseInt(body && body.limits, 10);
+  if (!Number.isFinite(limits)) return { error: '上限要填数字' };
+
+  if (limits <= 0) {
+    await env.DB.prepare('DELETE FROM week_limits WHERE nick = ?1 AND week_start = ?2').bind(nick, ws).run();
+    return { ok: true, limits: cfg.maxPerWeek, cleared: true };
+  }
+
+  const v = Math.min(60, limits);
+  await env.DB.prepare(
+    'INSERT INTO week_limits (nick, week_start, limits) VALUES (?1,?2,?3) ' +
+    'ON CONFLICT(nick, week_start) DO UPDATE SET limits = excluded.limits'
+  ).bind(nick, ws, v).run();
+  return { ok: true, limits: v };
+}
+
+async function adminPerson(env, body) {
+  const nick = cleanName(body && body.nick);
+  if (!nick) return { error: '缺少名字' };
+  if (!(await rosterByNick(env, nick))) return { error: '名单里没有「' + nick + '」' };
+
+  const phone = String((body && body.phone) || '').replace(/[^0-9+\-\s]/g, '').slice(0, 20);
+  const memo = String((body && body.memo) || '').slice(0, 60);
+
+  try {
+    await env.DB.prepare('UPDATE roster SET phone = ?1, memo = ?2 WHERE nick = ?3')
+      .bind(phone, memo, nick).run();
+  } catch (e) {
+    return { error: '数据库还没加 phone / memo 列，请先执行 schema.sql 里的 ALTER 语句' };
+  }
+  return { ok: true };
 }
 
 async function adminRosterAdd(env, body) {
@@ -835,6 +1399,8 @@ export async function onRequest(context) {
         return json(await adminCell(env, cfg, url.searchParams.get('date') || '', url.searchParams.get('slotId') || ''));
       }
       if (path === 'admin/roster') return json(await adminRoster(env));
+      if (path === 'admin/cards') return json(await adminCards(env));
+      if (path === 'admin/stats') return json(await adminStats(env, cfg));
 
       if (path === 'admin/export') {
         const out = await adminExport(env, cfg, url.searchParams.get('week') === '1' ? 1 : 0);
@@ -858,6 +1424,11 @@ export async function onRequest(context) {
         else if (path === 'admin/roster/remove') out = await adminRosterRemove(env, body);
         else if (path === 'admin/roster/restore') out = await adminRosterRestore(env, body);
         else if (path === 'admin/rename') out = await adminRename(env, body);
+        else if (path === 'admin/wallet') out = await adminWallet(env, body);
+        else if (path === 'admin/limit') out = await adminLimit(env, cfg, body);
+        else if (path === 'admin/person') out = await adminPerson(env, body);
+        else if (path === 'admin/cards/save') out = await adminCardSave(env, body);
+        else if (path === 'admin/cards/remove') out = await adminCardRemove(env, body);
         else return json({ error: '接口不存在' }, 404);
         return json(out, out.error ? 400 : 200);
       }
@@ -884,6 +1455,12 @@ export async function onRequest(context) {
       }
     }
 
+    if (path === 'mine') {
+      if (!who) return json({ error: '需要入场码', needCode: true }, 401);
+      await settle(env, cfg);
+      return json(await memberProfile(env, cfg, who));
+    }
+
     if (path === 'board') {
       if (!who) return json({ error: '需要入场码', needCode: true }, 401);
       await touchDevice(env, who.code, url.searchParams.get('client') || '');
@@ -893,6 +1470,7 @@ export async function onRequest(context) {
     if (path === 'signup' || path === 'cancel') {
       if (request.method !== 'POST') return json({ error: '请用 POST' }, 405);
       if (!who) return json({ error: '需要入场码', needCode: true }, 401);
+      await settle(env, cfg);
       const body = await request.json().catch(() => ({}));
       const out = path === 'signup'
         ? await doSignup(env, cfg, who, body)
