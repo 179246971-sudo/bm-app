@@ -1358,46 +1358,107 @@ async function adminRename(env, body) {
   return { ok: true };
 }
 
-/* ==================== 管理：导出 CSV ==================== */
+/* ==================== 管理：导出会员表 ==================== */
 
-async function adminExport(env, cfg, week) {
-  const now = Date.now();
-  const t = bjParts(now);
-  const backToMon = (t.dow + 6) % 7;
-  const base = bjEpoch(t.y, t.m, t.d, 0, 0) - backToMon * 86400000;
-  const offset = (week === 1 ? 7 : 0) * 86400000;
-  const from = ymd(bjParts(base + offset));
-  const to = ymd(bjParts(base + offset + 6 * 86400000));
+function bjDateStr(ts) {
+  const p = bjParts(ts);
+  return p.y + '-' + String(p.m).padStart(2, '0') + '-' + String(p.d).padStart(2, '0');
+}
 
-  const rs = await env.DB.prepare(
-    'SELECT slot_date, slot_id, nickname FROM signups WHERE slot_date >= ?1 AND slot_date <= ?2'
-  ).bind(from, to).all();
-
-  const map = new Map();
-  for (const r of rs.results || []) {
-    const k = r.slot_date + '|' + r.slot_id;
-    if (!map.has(k)) map.set(k, []);
-    map.get(k).push(r.nickname);
+async function adminExportMembers(env) {
+  let rs;
+  try {
+    rs = await env.DB.prepare(
+      'SELECT nick, code, disabled, created_at, phone, memo FROM roster ' +
+      'ORDER BY disabled ASC, created_at DESC'
+    ).all();
+  } catch (e) {
+    rs = await env.DB.prepare(
+      'SELECT nick, code, disabled, created_at FROM roster ' +
+      'ORDER BY disabled ASC, created_at DESC'
+    ).all();
   }
 
-  const rows = [['日期', '星期', '开始', '结束', '名额', '已报', '报名人']];
-  for (let i = 0; i < 7; i++) {
-    const p = bjParts(base + offset + i * 86400000);
-    const date = ymd(p);
-    for (const slot of slotsOf(cfg, p.dow)) {
-      const cc = resolveCell(p, slot, cfg);
-      if (cc.off) continue;
-      const names = map.get(date + '|' + slot.id) || [];
-      rows.push([date, WEEK_CN[p.dow], cc.start, cc.end,
-                 String(cc.cap), String(names.length), names.join('、')]);
+  const credMap = new Map();
+  try {
+    const w = await env.DB.prepare('SELECT nick, credits FROM wallets').all();
+    for (const x of w.results || []) credMap.set(x.nick, x.credits);
+  } catch (e) { /* 忽略 */ }
+
+  const sumMap = new Map();
+  try {
+    const lg = await env.DB.prepare(
+      'SELECT nick, kind, SUM(delta) AS s FROM wallet_log GROUP BY nick, kind'
+    ).all();
+    for (const x of lg.results || []) {
+      let o = sumMap.get(x.nick);
+      if (!o) { o = { recharge: 0, consume: 0, refund: 0, adjust: 0 }; sumMap.set(x.nick, o); }
+      const v = x.s || 0;
+      if (x.kind === 'recharge') o.recharge += v;
+      else if (x.kind === 'consume') o.consume += -v;
+      else if (x.kind === 'refund') o.refund += -v;
+      else o.adjust += v;
     }
+  } catch (e) { /* 忽略 */ }
+
+  const signMap = new Map();
+  try {
+    const sg = await env.DB.prepare(
+      'SELECT nickname, COUNT(*) AS n, MAX(slot_date) AS d FROM signups GROUP BY nickname'
+    ).all();
+    for (const x of sg.results || []) signMap.set(x.nickname, { n: x.n, last: x.d });
+  } catch (e) { /* 忽略 */ }
+
+  const consMap = new Map();
+  try {
+    const c = await env.DB.prepare('SELECT nick, COUNT(*) AS n FROM consumptions GROUP BY nick').all();
+    for (const x of c.results || []) consMap.set(x.nick, x.n);
+  } catch (e) { /* 忽略 */ }
+
+  const canMap = new Map();
+  try {
+    const c = await env.DB.prepare('SELECT nick, COUNT(*) AS n FROM cancel_log GROUP BY nick').all();
+    for (const x of c.results || []) canMap.set(x.nick, x.n);
+  } catch (e) { /* 忽略 */ }
+
+  const rows = [[
+    '姓名', '手机号', '备注', '状态', '剩余次数', '待扣次数', '可用次数',
+    '累计充值', '累计消耗', '累计退款调整', '累计报名', '最近报名',
+    '累计取消', '加入日期', '入场码'
+  ]];
+
+  for (const r of rs.results || []) {
+    const credits = credMap.get(r.nick) || 0;
+    const sg = signMap.get(r.nick) || {};
+    const total = sg.n || 0;
+    const consumed = consMap.get(r.nick) || 0;
+    const pending = Math.max(0, total - consumed);
+    const sm = sumMap.get(r.nick) || { recharge: 0, consume: 0, refund: 0, adjust: 0 };
+
+    rows.push([
+      r.nick,
+      r.phone || '',
+      r.memo || '',
+      r.disabled ? '已移出' : '正常',
+      String(credits),
+      String(pending),
+      String(credits - pending),
+      String(sm.recharge),
+      String(sm.consume),
+      String(sm.refund + sm.adjust),
+      String(total),
+      sg.last || '',
+      String(canMap.get(r.nick) || 0),
+      bjDateStr(r.created_at),
+      r.code
+    ]);
   }
 
-  const csv = rows.map((r) =>
-    r.map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(',')
+  const csv = rows.map((row) =>
+    row.map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(',')
   ).join('\r\n');
 
-  return { csv: '\uFEFF' + csv, filename: 'baoming_' + from + '_' + to + '.csv' };
+  return { csv: '\uFEFF' + csv, filename: '会员表_' + bjDateStr(Date.now()) + '.csv' };
 }
 
 /* ==================== 入口 ==================== */
@@ -1475,13 +1536,16 @@ export async function onRequest(context) {
         });
       }
 
-      if (path === 'admin/export') {
-        const out = await adminExport(env, cfg, url.searchParams.get('week') === '1' ? 1 : 0);
+      if (path === 'admin/export-members') {
+        const out = await adminExportMembers(env);
+        // HTTP 头只能放 ASCII，中文文件名要用 filename* 的百分号编码
+        const ascii = out.filename.replace(/[^\x20-\x7e]/g, '') || 'members.csv';
         return new Response(out.csv, {
           status: 200,
           headers: {
             'content-type': 'text/csv; charset=utf-8',
-            'content-disposition': 'attachment; filename="' + out.filename + '"',
+            'content-disposition': 'attachment; filename="' + ascii + '"; ' +
+              "filename*=UTF-8''" + encodeURIComponent(out.filename),
             'cache-control': 'no-store'
           }
         });
