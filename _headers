@@ -1,8 +1,27 @@
 # Cloudflare Pages 响应头（放在项目根目录）
-# 整个站都是报名工具，全站不收录
 
 /*
   X-Robots-Tag: noindex, nofollow
+
+# HTML 每次都要回源，否则手机上老是用旧页面
+/*.html
+  Cache-Control: no-cache, must-revalidate
+
+/
+  Cache-Control: no-cache, must-revalidate
+
+# 带 ?v= 的 css/js 可以长缓存（换版本号就等于换 URL）
+/style.css
+  Cache-Control: public, max-age=60, must-revalidate
+
+/app.js
+  Cache-Control: public, max-age=60, must-revalidate
+
+/admin.js
+  Cache-Control: public, max-age=60, must-revalidate
+
+/grid.js
+  Cache-Control: public, max-age=60, must-revalidate
 
 # manifest 的类型要正确，否则安卓「添加到桌面」会失效
 /manifest.webmanifest
