@@ -78,8 +78,8 @@ function showApp() {
 
 async function tryCode() {
   const raw = ($('#codeInput').value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (raw.length < 4) {
-    $('#entryErr').textContent = '入场码是 6 位字母数字';
+  if (raw.length < 6) {
+    $('#entryErr').textContent = '入场码是 6 位，还差 ' + (6 - raw.length) + ' 位';
     return;
   }
 
@@ -102,8 +102,8 @@ async function tryCode() {
     state.code = back;
     $('#entryErr').textContent = e.needCode ? e.message : ('进不去：' + e.message);
   } finally {
-    $('#codeBtn').disabled = false;
     $('#codeBtn').textContent = '进 入';
+    syncBtn();
   }
 }
 
@@ -118,8 +118,14 @@ function render() {
   $('#sub').textContent = d.subtitle || '';
   const meEl = $('#me');
   if (meEl) {
-    if (d.myName) { meEl.textContent = '我是 ' + d.myName; meEl.hidden = false; }
-    else { meEl.hidden = true; }
+    if (d.myName) {
+      const bal = d.wallet ? d.wallet.available : null;
+      meEl.textContent = '我是 ' + d.myName + (bal === null ? '' : ' · ' + bal + ' 次');
+      meEl.hidden = false;
+      meEl.className = 'me-badge' + (bal !== null && bal <= 2 ? ' is-low' : '');
+    } else {
+      meEl.hidden = true;
+    }
   }
 
   const statsBox = $('#stats');
@@ -176,11 +182,13 @@ function openDialog(day, cell) {
     btns = '<button class="btn" data-act="close">知道了</button>';
   } else if (cell.mine) {
     if (cell.canCancel) {
-      note = '<div class="dlg-note" id="cd">取消窗口剩余 ' + mmss(cell.cancelLeft) + '</div>';
+      note = '<div class="dlg-note">最晚 ' + esc(cell.cancelByText) + ' 前可以取消' +
+             '，这一周还能取消 ' + cell.cancelLeft + ' 次</div>';
       btns = '<button class="btn" data-act="close">再想想</button>' +
         '<button class="btn danger" data-act="cancel">确认取消</button>';
     } else {
-      note = '<div class="dlg-note mute">报名已超过 ' + d.cancelMin + ' 分钟，不能取消了。</div>';
+      note = '<div class="dlg-note mute">现在不能自己取消了：<br>' +
+             esc(cell.cancelWhy || '') + '<br>请联系群主</div>';
       btns = '<button class="btn" data-act="close">知道了</button>';
     }
   } else if (!cell.open) {
@@ -194,8 +202,10 @@ function openDialog(day, cell) {
            ' 节。<br>还想加课请找群主。</div>';
     btns = '<button class="btn" data-act="close">知道了</button>';
   } else {
-    note = '<div class="dlg-note mute">报名后 ' + d.cancelMin + ' 分钟内可以取消。<br>' +
-           '这一天你还能报 ' + (maxDay - usedToday) + ' 节。</div>';
+    const bal = d.wallet ? d.wallet.available : null;
+    note = '<div class="dlg-note mute">开课时扣 1 次' +
+           (bal === null ? '' : '，你现在可用 ' + bal + ' 次') + '。<br>' +
+           '这一天还能报 ' + (maxDay - usedToday) + ' 节。</div>';
     btns = '<button class="btn" data-act="close">否</button>' +
       '<button class="btn primary" data-act="signup">确认报名</button>';
   }
@@ -210,26 +220,6 @@ function openDialog(day, cell) {
       if (act === 'cancel') doCancel(day, cell);
     });
   });
-
-  if (cell.mine && cell.canCancel) {
-    const t0 = Date.now();
-    const base = cell.cancelLeft;
-    state.timer = setInterval(() => {
-      const left = base - (Date.now() - t0);
-      const cd = document.getElementById('cd');
-      if (!cd) return;
-      if (left <= 0) {
-        clearInterval(state.timer);
-        state.timer = null;
-        cd.textContent = '取消窗口已关闭，不能取消了。';
-        cd.className = 'dlg-note mute';
-        const btn = document.querySelector('[data-act="cancel"]');
-        if (btn) btn.disabled = true;
-      } else {
-        cd.textContent = '取消窗口剩余 ' + mmss(left);
-      }
-    }, 500);
-  }
 
   $('#mask').hidden = false;
 }
@@ -296,9 +286,20 @@ function startPolling() {
 
 $('#codeBtn').addEventListener('click', tryCode);
 $('#codeInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryCode(); });
+function syncBtn() {
+  const v = ($('#codeInput').value || '').replace(/[^A-Z0-9]/g, '');
+  $('#codeBtn').disabled = v.length < 6;
+}
+
 $('#codeInput').addEventListener('input', (e) => {
   e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  $('#entryErr').textContent = '';
+  syncBtn();
 });
+syncBtn();
+
+const meBtn = $('#me');
+if (meBtn) meBtn.addEventListener('click', openMine);
 
 $('#mask').addEventListener('click', (e) => {
   if (e.target === $('#mask')) closeDialog();
@@ -334,3 +335,77 @@ if ('serviceWorker' in navigator) {
 })();
 
 if (state.code) load(); else showEntry();
+
+/* ---------------- 我的 ---------------- */
+
+function kindText(k) {
+  return ({ consume: '上课扣次', recharge: '充值', refund: '退款', adjust: '调整' })[k] || k;
+}
+
+async function openMine() {
+  if (!state.code) return;
+  closeDialog();
+
+  const dlg = $('#dialog');
+  dlg.innerHTML = '<div class="loading">加载中…</div>';
+  $('#mask').hidden = false;
+
+  try {
+    const m = await api('/mine?k=' + encodeURIComponent(state.code));
+    renderMine(m);
+  } catch (e) {
+    if (e.needCode) { closeDialog(); showEntry(e.message); return; }
+    dlg.innerHTML = '<div class="err">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderMine(m) {
+  const dlg = $('#dialog');
+  const bal = m.wallet.available;
+
+  let h = '<div class="dlg-h">' + esc(m.nick) + '</div>';
+
+  h += '<div class="mine-bal' + (bal <= 2 ? ' is-low' : '') + '">' +
+       '<span>剩余</span><b>' + bal + '</b><em>次</em></div>';
+
+  if (m.wallet.pending > 0) {
+    h += '<div class="mine-sub">另有 ' + m.wallet.pending + ' 节课还没上，开课时会扣</div>';
+  }
+
+  h += '<div class="mine-stats">本周 <b>' + m.stats.week + '</b> 次 · 本月 <b>' +
+       m.stats.month + '</b> 次 · 今年 <b>' + m.stats.year + '</b> 次</div>';
+
+  h += '<div class="mine-quota">';
+  m.weeks.forEach((w) => {
+    h += '<span>' + esc(w.label) + '：取消 ' + w.cancelUsed + '/' + w.cancelQuota +
+         '　报名 ' + w.signupUsed + '/' + w.signupLimit + '</span>';
+  });
+  h += '</div>';
+
+  if (m.upcoming.length) {
+    h += '<div class="mine-sec">接下来要上的</div>';
+    m.upcoming.forEach((u) => {
+      h += '<div class="mine-line"><span>' + esc(u.weekday) + ' ' + esc(u.md) + '</span>' +
+           '<b class="up">' + esc(u.start) + '-' + esc(u.end) + '</b></div>';
+    });
+  } else {
+    h += '<div class="mine-sec">接下来要上的</div><div class="mine-line mute">还没有报名</div>';
+  }
+
+  if (m.log.length) {
+    h += '<div class="mine-sec">最近记录</div>';
+    m.log.slice(0, 8).forEach((l) => {
+      const t = new Date(l.created_at);
+      const md = (t.getMonth() + 1) + '/' + t.getDate();
+      h += '<div class="mine-line"><span>' + md + '　' + esc(l.note || kindText(l.kind)) + '</span>' +
+           '<b class="' + (l.delta > 0 ? 'up' : 'down') + '">' +
+           (l.delta > 0 ? '+' : '') + l.delta + '</b>' +
+           '<i>剩 ' + l.balance_after + '</i></div>';
+    });
+  }
+
+  h += '<div class="dlg-btns"><button class="btn" type="button" data-act="close">关上</button></div>';
+
+  dlg.innerHTML = h;
+  dlg.querySelector('[data-act="close"]').addEventListener('click', closeDialog);
+}

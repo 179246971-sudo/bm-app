@@ -70,6 +70,8 @@ function enterApp() {
   loadConfig();
   loadBoard();
   loadRoster();
+  loadCards();
+  loadStats();
 }
 
 /* ---------------- 课表设置 ---------------- */
@@ -472,13 +474,14 @@ $('#pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); }
 
 $('#saveBtn').addEventListener('click', saveConfig);
 
-const TABS = ['manage', 'schedule', 'roster'];
+const TABS = ['home', 'manage', 'schedule', 'roster'];
 document.querySelectorAll('.tab').forEach((t) => {
   t.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach((x) => x.classList.remove('on'));
     t.classList.add('on');
     TABS.forEach((id) => { $('#tab-' + id).hidden = t.dataset.tab !== id; });
     if (t.dataset.tab === 'roster') loadRoster();
+    if (t.dataset.tab === 'home') loadStats();
   });
 });
 
@@ -540,12 +543,21 @@ function renderRoster(people) {
       ? '<i class="badge-warn">' + p.devices + ' 台设备</i>'
       : (p.devices ? p.devices + ' 台设备' : '未入场');
 
+    const bal = p.credits === undefined ? 0 : p.credits;
     el.innerHTML =
       '<span class="rname">' + esc(p.nick) + '</span>' +
       '<span class="rcode">' + esc(p.code) + '</span>' +
-      '<span class="rmeta">' + devTag + ' · 报名 ' + p.signups + ' 次 · ' + fmtTime(p.lastSeen) + '</span>' +
+      '<span class="rmeta">' +
+        '<b class="rbal' + (bal <= 2 ? ' is-low' : '') + '">' + bal + ' 次</b>' +
+        ' · ' + devTag + ' · 报名 ' + p.signups + ' 次' +
+        (p.phone ? ' · ' + esc(p.phone) : '') +
+        (p.memo ? ' · ' + esc(p.memo) : '') +
+      '</span>' +
       '<span class="racts">' +
         '<button class="btn tiny" data-copy="' + esc(p.code) + '">复制链接</button>' +
+        '<button class="btn tiny" data-money="' + esc(p.nick) + '">充值</button>' +
+        '<button class="btn tiny" data-limit="' + esc(p.nick) + '">提额</button>' +
+        '<button class="btn tiny" data-info="' + esc(p.nick) + '">资料</button>' +
         '<button class="btn tiny" data-rotate="' + esc(p.nick) + '">换码</button>' +
         (p.disabled
           ? '<button class="btn tiny" data-restore="' + esc(p.nick) + '">恢复</button>'
@@ -557,6 +569,15 @@ function renderRoster(people) {
     });
     el.querySelectorAll('[data-rotate]').forEach((b) => {
       b.addEventListener('click', () => rotateCode(b.dataset.rotate));
+    });
+    el.querySelectorAll('[data-money]').forEach((b) => {
+      b.addEventListener('click', () => adjustWallet(b.dataset.money, bal));
+    });
+    el.querySelectorAll('[data-limit]').forEach((b) => {
+      b.addEventListener('click', () => raiseLimit(b.dataset.limit));
+    });
+    el.querySelectorAll('[data-info]').forEach((b) => {
+      b.addEventListener('click', () => editPerson(b.dataset.info, p.phone || '', p.memo || ''));
     });
     el.querySelectorAll('[data-restore]').forEach((b) => {
       b.addEventListener('click', () => restorePerson(b.dataset.restore));
@@ -661,5 +682,260 @@ async function exportCsv(week) {
 }
 
 $('#rosterAdd').addEventListener('click', addNames);
+$('#cardAdd').addEventListener('click', () => editCard(null));
 $('#exportThis').addEventListener('click', () => exportCsv(0));
 $('#exportNext').addEventListener('click', () => exportCsv(1));
+
+/* ==================== 通用小表单弹窗 ==================== */
+
+function openForm(title, fields, onSubmit) {
+  const dlg = $('#dialog');
+  let html = '<div class="dlg-h">' + Grid.esc(title) + '</div>';
+
+  fields.forEach((f, i) => {
+    html += '<div class="fld"><label>' + Grid.esc(f.label) + '</label>';
+    if (f.type === 'select') {
+      html += '<select class="inp" data-i="' + i + '">' +
+        f.options.map((o) => '<option value="' + Grid.esc(o[0]) + '"' +
+          (String(f.value) === String(o[0]) ? ' selected' : '') + '>' +
+          Grid.esc(o[1]) + '</option>').join('') + '</select>';
+    } else {
+      html += '<input class="inp" data-i="' + i + '" type="' + (f.type || 'text') +
+        '" value="' + Grid.esc(f.value === undefined ? '' : f.value) +
+        '" placeholder="' + Grid.esc(f.ph || '') + '">';
+    }
+    html += '</div>';
+  });
+
+  html += '<div class="dlg-btns">' +
+    '<button class="btn" type="button" data-act="close">取消</button>' +
+    '<button class="btn primary" type="button" data-act="ok">确定</button></div>';
+
+  dlg.innerHTML = html;
+  $('#mask').hidden = false;
+
+  dlg.querySelector('[data-act="close"]').addEventListener('click', closeDialog);
+  dlg.querySelector('[data-act="ok"]').addEventListener('click', () => {
+    const vals = {};
+    dlg.querySelectorAll('[data-i]').forEach((el) => {
+      vals[fields[+el.dataset.i].key] = el.value;
+    });
+    closeDialog();
+    onSubmit(vals);
+  });
+}
+
+function adjustWallet(nick, cur) {
+  api('/admin/cards').then((r) => {
+    const cards = (r && r.cards) || [];
+    const opts = cards.map((c) => [String(c.id),
+      c.name + '｜' + c.credits + ' 次' + (c.price ? '｜¥' + c.price : '')]);
+    opts.push(['0', '自定义次数（手动填）']);
+    opts.push(['-1', '退款 / 扣减']);
+
+    openForm('给「' + nick + '」操作次卡（当前 ' + cur + ' 次）', [
+      { key: 'card', label: '选一项', type: 'select', value: '0', options: opts }
+    ], (v) => {
+      if (v.card === '0') return customRecharge(nick, 1);
+      if (v.card === '-1') return customRecharge(nick, -1);
+
+      const c = cards.find((x) => String(x.id) === String(v.card));
+      if (!c) return customRecharge(nick, 1);
+
+      if (!confirm('给「' + nick + '」充 ' + c.credits + ' 次？\n\n' +
+                   c.name + (c.price ? '　¥' + c.price : ''))) return;
+
+      api('/admin/wallet', { nick, delta: c.credits, kind: 'recharge',
+                             amount: c.price, note: c.name })
+        .then((x) => {
+          $('#rosterHint').textContent = nick + ' 充了 ' + c.credits + ' 次，现在 ' + x.credits + ' 次';
+          loadRoster();
+        })
+        .catch((e) => alert('失败：' + e.message));
+    });
+  }).catch(() => customRecharge(nick, 1));
+}
+
+function customRecharge(nick, sign) {
+  const isMinus = sign < 0;
+  openForm((isMinus ? '给「' : '给「') + nick + '」' + (isMinus ? '退款 / 扣减' : '自定义充值'), [
+    { key: 'delta', label: isMinus ? '扣减几次' : '加几次', type: 'number', value: '1' },
+    { key: 'amount', label: '涉及金额（可选，只记账）', type: 'number', value: '' },
+    { key: 'note', label: '备注', type: 'text', value: '', ph: isMinus ? '例如：退 5 次，已退钱' : '例如：10 次卡' }
+  ], (v) => {
+    const n = Math.abs(parseInt(v.delta, 10) || 0);
+    if (!n) return alert('请填次数');
+    api('/admin/wallet', {
+      nick, delta: isMinus ? -n : n,
+      kind: isMinus ? 'refund' : 'adjust',
+      amount: v.amount, note: v.note
+    }).then((x) => {
+      $('#rosterHint').textContent = nick + ' 现在 ' + x.credits + ' 次';
+      loadRoster();
+    }).catch((e) => alert('失败：' + e.message));
+  });
+}
+
+async function loadCards() {
+  const box = $('#cardList');
+  if (!box) return;
+  try {
+    const r = await api('/admin/cards');
+    renderCards(r.cards || []);
+  } catch (e) {
+    box.innerHTML = '<div class="err">读取失败：' + Grid.esc(e.message) + '</div>';
+  }
+}
+
+function renderCards(list) {
+  const box = $('#cardList');
+  if (!list.length) {
+    box.innerHTML = '<div class="none" style="padding:12px;color:#8b9099">还没有次卡，点下面新建一张</div>';
+    return;
+  }
+  box.innerHTML = '';
+  list.forEach((c) => {
+    const el = document.createElement('div');
+    el.className = 'card-row';
+    el.innerHTML =
+      '<b>' + Grid.esc(c.name) + '</b>' +
+      '<span class="cmeta">' + c.credits + ' 次' + (c.price ? '　¥' + c.price : '　未定价') + '</span>' +
+      '<span class="racts">' +
+        '<button class="btn tiny" type="button" data-edit>改名/改价</button>' +
+        '<button class="btn tiny warn" type="button" data-del>删</button>' +
+      '</span>';
+    el.querySelector('[data-edit]').addEventListener('click', () => editCard(c));
+    el.querySelector('[data-del]').addEventListener('click', () => removeCard(c));
+    box.appendChild(el);
+  });
+}
+
+function editCard(c) {
+  openForm(c ? '修改次卡' : '新建次卡', [
+    { key: 'name', label: '次卡名字', value: c ? c.name : '', ph: '例如：10 次卡' },
+    { key: 'credits', label: '包含几次', type: 'number', value: c ? c.credits : 10 },
+    { key: 'price', label: '价格（元，只用来记账）', type: 'number', value: c ? c.price : 800 }
+  ], (v) => {
+    api('/admin/cards/save', {
+      id: c ? c.id : 0, name: v.name, credits: v.credits, price: v.price
+    }).then(() => {
+      loadCards();
+      $('#rosterHint').textContent = '次卡已保存';
+    }).catch((e) => alert('失败：' + e.message));
+  });
+}
+
+function removeCard(c) {
+  if (!confirm('删掉次卡「' + c.name + '」？\n\n已经充给学员的次数不受影响。')) return;
+  api('/admin/cards/remove', { id: c.id })
+    .then(() => loadCards())
+    .catch((e) => alert('失败：' + e.message));
+}
+
+function bjMonday(offsetWeeks) {
+  const t = new Date(Date.now() + 8 * 3600 * 1000);
+  const back = (t.getUTCDay() + 6) % 7;
+  const ms = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) -
+             back * 86400000 + offsetWeeks * 7 * 86400000;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function raiseLimit(nick) {
+  const thisMon = bjMonday(0);
+  const nextMon = bjMonday(1);
+  openForm('给「' + nick + '」提额', [
+    { key: 'week', label: '哪一周（按课时所在周）', type: 'select', value: nextMon,
+      options: [[thisMon, '本周 ' + thisMon], [nextMon, '下周 ' + nextMon]] },
+    { key: 'limits', label: '这一周最多能报几节', type: 'number',
+      value: (S.cfg && S.cfg.maxPerWeek) || 6 },
+    { key: 'note', label: '填 0 表示取消提额，恢复默认', type: 'text', value: '', ph: '可选' }
+  ], async (v) => {
+    try {
+      const r = await api('/admin/limit', { nick, weekStart: v.week, limits: v.limits });
+      $('#rosterHint').textContent = r.cleared
+        ? nick + ' 已恢复默认上限'
+        : nick + ' 在 ' + v.week + ' 那周可报 ' + r.limits + ' 节';
+    } catch (e) { alert('失败：' + e.message); }
+  });
+}
+
+function editPerson(nick, phone, memo) {
+  openForm('「' + nick + '」的资料', [
+    { key: 'phone', label: '手机号（只有你能看到）', type: 'tel', value: phone },
+    { key: 'memo', label: '备注', type: 'text', value: memo, ph: '例如：孩子上小学三年级' }
+  ], async (v) => {
+    try {
+      await api('/admin/person', { nick, phone: v.phone, memo: v.memo });
+      $('#rosterHint').textContent = nick + ' 的资料已保存';
+      loadRoster();
+    } catch (e) { alert('失败：' + e.message); }
+  });
+}
+
+/* ==================== 概览看板 ==================== */
+
+function kpi(label, value, cls) {
+  return '<div class="kpi' + (cls ? ' ' + cls : '') + '">' +
+    '<span>' + Grid.esc(label) + '</span>' +
+    '<b>' + Grid.esc(String(value)) + '</b></div>';
+}
+
+function alertRow(title, detail) {
+  return '<div class="alert-row"><b>' + Grid.esc(title) + '</b>' +
+    (detail ? '<span>' + Grid.esc(detail) + '</span>' : '') + '</div>';
+}
+
+async function loadStats() {
+  const box = $('#homeBox');
+  if (!box) return;
+  try {
+    const s = await api('/admin/stats');
+    renderStats(s);
+  } catch (e) {
+    if (e.status === 401) { backToLogin(); return; }
+    box.innerHTML = '<div class="err">读取失败：' + Grid.esc(e.message) + '</div>';
+  }
+}
+
+function renderStats(s) {
+  const w = s.week, m = s.month, a = s.alerts;
+  let h = '';
+
+  h += '<div class="sec-h">' + Grid.esc(w.label) + '　' + Grid.esc(w.range) + '</div>';
+  h += '<div class="kpis">' +
+    kpi('已报课次', w.filled) +
+    kpi('满员率', w.rate + '%') +
+    kpi('参与人数', w.people) +
+    kpi('空时段', w.emptyCells) +
+    '</div>';
+
+  h += '<div class="sec-h">' + Grid.esc(m.label) + '　次卡与流水</div>';
+  h += '<div class="kpis">' +
+    kpi('本月充值', '+' + m.recharge) +
+    kpi('本月消耗', '-' + m.consume) +
+    kpi('本月退款', '-' + m.refund) +
+    kpi('本月取消', m.cancels) +
+    '</div>';
+  h += '<div class="kpis small">' +
+    kpi('有效名单', m.people + ' 人') +
+    kpi('有余额', m.withCredits + ' 人') +
+    kpi('余额为 0', m.zero + ' 人', m.zero > 0 ? 'warn' : '') +
+    kpi('余额总量', m.creditsTotal + ' 次') +
+    '</div>';
+
+  h += '<div class="sec-h">要你处理的事</div>';
+  h += '<div class="alerts">';
+  h += alertRow(a.lowCount ? a.lowCount + ' 人余额 ≤2 次，该催续费了' : '没有人余额不足',
+                a.low.join('、'));
+  h += alertRow(a.idleCount ? a.idleCount + ' 人 3 周没报名' : '没有流失迹象',
+                a.idle.join('、'));
+  if (a.cold.length) {
+    h += alertRow('这些时段偏冷',
+      a.cold.map((c) => c.weekday + ' ' + c.start + '（' + c.n + '/' + c.cap + '）').join('　'));
+  }
+  h += '</div>';
+
+  h += '<div class="hint" style="padding:10px 2px 0">数据每次打开实时算，点右上角的页签可以切换。</div>';
+
+  $('#homeBox').innerHTML = h;
+}
