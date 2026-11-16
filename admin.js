@@ -91,7 +91,6 @@ function fillForm() {
   const c = S.cfg;
   $('#cfgTitle').value = c.title || '';
   $('#cfgSub').value = c.subtitle || '';
-  $('#cfgCancel').value = c.cancelMin || 3;
   $('#cfgMaxDay').value = c.maxPerDay || 2;
   $('#cfgSlotMin').value = c.slotMinutes || 60;
   $('#cfgShowStats').checked = c.showStats !== false;
@@ -191,7 +190,6 @@ function collectConfig() {
   return {
     title: $('#cfgTitle').value.trim() || 'Hihi Studio',
     subtitle: $('#cfgSub').value,
-    cancelMin: parseInt($('#cfgCancel').value, 10) || 3,
     maxPerDay: parseInt($('#cfgMaxDay').value, 10) || 2,
     slotMinutes: parseInt($('#cfgSlotMin').value, 10) || 60,
     showStats: !!$('#cfgShowStats').checked,
