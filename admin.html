@@ -17,14 +17,29 @@
 
   <main>
     <!-- 登录 -->
-    <section id="loginPanel" class="panel">
-      <div class="fld">
-        <label>管理员密码</label>
-        <input id="pwd" type="password" class="inp" autocomplete="current-password"
-               placeholder="Cloudflare 环境变量 ADMIN_PASSWORD">
+    <section id="loginPanel" class="login-wrap">
+      <div class="login-card">
+        <div class="login-mark">h</div>
+        <h2 class="login-title">管理员登录</h2>
+        <p class="login-sub">仅限管理员 · 请勿分享密码</p>
+
+        <div class="login-field">
+          <input id="pwd" type="password" class="login-inp" autocomplete="current-password"
+                 aria-label="管理员密码" placeholder="输入管理员密码">
+          <button type="button" id="pwdEye" class="login-eye" aria-label="显示密码" title="显示密码">
+            <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true">
+              <path d="M1.6 12S5.6 5.8 12 5.8 22.4 12 22.4 12 18.4 18.2 12 18.2 1.6 12 1.6 12Z"
+                    fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+              <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="1.6"/>
+              <line class="eye-off" x1="4.5" y1="19.5" x2="19.5" y2="4.5"
+                    stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+
+        <button id="loginBtn" class="btn login-btn">进入后台</button>
+        <div class="hint login-hint" id="loginHint"></div>
       </div>
-      <button id="loginBtn" class="btn primary">进入后台</button>
-      <div class="hint" id="loginHint"></div>
     </section>
 
     <!-- 后台 -->

@@ -66,6 +66,7 @@ async function login() {
 function enterApp() {
   $('#loginPanel').hidden = true;
   $('#appPanel').hidden = false;
+  resetPwd();
   loadConfig();
   loadBoard();
   loadRoster();
@@ -359,7 +360,29 @@ function backToLogin() {
   $('#appPanel').hidden = true;
   $('#loginPanel').hidden = false;
   $('#loginHint').textContent = '登录已失效，请重新输入密码';
+  resetPwd();
   try { sessionStorage.removeItem('bm_admin_key'); } catch (e) { /* 忽略 */ }
+}
+
+$('#pwdEye').addEventListener('click', () => {
+  const el = $('#pwd');
+  const show = el.type === 'password';
+  el.type = show ? 'text' : 'password';
+  $('#pwdEye').classList.toggle('is-on', show);
+  $('#pwdEye').title = show ? '隐藏密码' : '显示密码';
+  $('#pwdEye').setAttribute('aria-label', show ? '隐藏密码' : '显示密码');
+  el.focus();
+  try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) { /* 忽略 */ }
+});
+
+function resetPwd() {
+  const el = $('#pwd');
+  if (!el) return;
+  el.value = '';
+  el.type = 'password';
+  $('#pwdEye').classList.remove('is-on');
+  $('#pwdEye').title = '显示密码';
+  $('#pwdEye').setAttribute('aria-label', '显示密码');
 }
 
 $('#loginBtn').addEventListener('click', login);

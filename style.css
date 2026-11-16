@@ -528,9 +528,9 @@ body.admin { padding-bottom: 24px; }
 }
 .entry-input:focus {
   outline: 0;
-  border-color: var(--brand);
+  border-color: #7a5638;
   background: #fff;
-  box-shadow: 0 0 0 4px rgba(43, 110, 246, .1);
+  box-shadow: 0 0 0 4px rgba(122, 86, 56, .12);
 }
 /* 入场页是竖向 flex，.btn 自带的 flex:1 会让按钮纵向撑满，这里必须压掉 */
 .entry > * { flex: none; }
@@ -630,4 +630,111 @@ body.admin { padding-bottom: 24px; }
   background: #eef2f8;
   border-radius: 999px;
   padding: 4px 10px;
+}
+
+/* ---------- 后台登录页 ---------- */
+.login-wrap {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 7vh 16px 24px;
+}
+.login-card {
+  width: 100%;
+  max-width: 336px;
+  background: #fff;
+  border-radius: 18px;
+  padding: 30px 22px 22px;
+  box-shadow: 0 8px 34px rgba(20, 28, 40, .10);
+  text-align: center;
+}
+.login-mark {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 15px;
+  border-radius: 17px;
+  background: linear-gradient(160deg, #2c3a50 0%, #131a24 100%);
+  color: #d8bc90;
+  font: italic 700 31px/56px Georgia, "Times New Roman", serif;
+}
+.login-title {
+  margin: 0 0 5px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--txt);
+}
+.login-sub {
+  margin: 0 0 22px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.login-field { position: relative; margin-bottom: 14px; }
+.login-inp {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 13px 46px 13px 14px;
+  font-size: 15px;
+  letter-spacing: 1px;
+  border: 1.5px solid var(--line);
+  border-radius: 11px;
+  background: #fbfcfe;
+  color: var(--txt);
+  -webkit-appearance: none;
+}
+.login-inp::placeholder {
+  color: #b0b7c0;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+.login-inp:focus {
+  outline: 0;
+  border-color: #7a5638;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(122, 86, 56, .12);
+}
+
+.login-eye {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #98a0aa;
+  border-radius: 9px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.login-eye:active { background: #eff1f4; }
+.login-eye.is-on { color: #7a5638; }
+.login-eye .eye-off { display: none; }
+.login-eye.is-on .eye-off { display: inline; }
+
+.btn.login-btn {
+  width: 100%;
+  flex: none;
+  padding: 12px;
+  font-size: 14.5px;
+  letter-spacing: 2px;
+  border-radius: 11px;
+  background: #7a5638;
+  color: #f7ecd8;
+  font-weight: 500;
+  box-shadow: 0 3px 10px rgba(122, 86, 56, .18);
+}
+.btn.login-btn:active {
+  background: #6a4a30;
+  transform: translateY(1px);
+}
+.login-hint {
+  min-height: 17px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--red);
+  text-align: center;
 }
