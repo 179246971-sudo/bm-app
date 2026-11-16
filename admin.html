@@ -6,7 +6,7 @@
   <meta name="format-detection" content="telephone=no">
   <meta name="robots" content="noindex,nofollow">
   <title>Hihi Studio · 管理后台</title>
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=7">
 </head>
 <body class="admin">
 
@@ -58,6 +58,8 @@
 
       <!-- 课表设置 -->
       <div id="tab-schedule" hidden>
+        <p class="tip">每天可以不一样：周四想 15:00 开始，就只改周四那几行。每格都能单独关闭。</p>
+
         <div class="fld">
           <label>页面标题</label>
           <input id="cfgTitle" class="inp" maxlength="40">
@@ -66,9 +68,21 @@
           <label>副标题</label>
           <input id="cfgSub" class="inp" maxlength="80">
         </div>
+
+        <div class="fld row2">
+          <div>
+            <label>取消窗口（分钟）</label>
+            <input id="cfgCancel" class="inp" type="number" min="1" max="120" inputmode="numeric">
+          </div>
+          <div>
+            <label>每人每天上限（节）</label>
+            <input id="cfgMaxDay" class="inp" type="number" min="1" max="20" inputmode="numeric">
+          </div>
+        </div>
+
         <div class="fld">
-          <label>取消窗口（分钟）</label>
-          <input id="cfgCancel" class="inp" type="number" min="1" max="120" inputmode="numeric">
+          <label>每节课时长（分钟）</label>
+          <input id="cfgSlotMin" class="inp" type="number" min="15" max="300" step="5" inputmode="numeric">
         </div>
 
         <div class="fld">
@@ -80,19 +94,9 @@
         </div>
 
         <div class="fld">
-          <label>时间段与每格名额</label>
-          <table class="ptable">
-            <thead>
-              <tr><th>开始</th><th>结束</th><th>名额</th><th></th></tr>
-            </thead>
-            <tbody id="pbody"></tbody>
-          </table>
-          <button id="addPeriod" class="btn small">＋ 加一个时间段</button>
-        </div>
-
-        <div class="fld">
-          <label>整天停课的星期</label>
-          <div id="dayOffBox" class="chips"></div>
+          <label>每周课表</label>
+          <div id="dayEditor"></div>
+          <button id="copyMon" class="btn small" type="button">把周一的课表复制到其他天</button>
         </div>
 
         <button id="saveBtn" class="btn primary">保存设置</button>
@@ -129,7 +133,7 @@
     <div class="dialog" id="dialog" role="dialog" aria-modal="true"></div>
   </div>
 
-  <script src="grid.js?v=6"></script>
-  <script src="admin.js?v=6"></script>
+  <script src="grid.js?v=7"></script>
+  <script src="admin.js?v=7"></script>
 </body>
 </html>

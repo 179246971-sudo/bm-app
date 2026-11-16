@@ -90,69 +90,149 @@ function fillForm() {
   $('#cfgTitle').value = c.title || '';
   $('#cfgSub').value = c.subtitle || '';
   $('#cfgCancel').value = c.cancelMin || 3;
+  $('#cfgMaxDay').value = c.maxPerDay || 2;
+  $('#cfgSlotMin').value = c.slotMinutes || 60;
   $('#cfgShowStats').checked = c.showStats !== false;
 
-  const body = $('#pbody');
-  body.innerHTML = '';
-  (c.periods || []).forEach((p) => addPeriodRow(p.start, p.end, p.cap, p.id));
+  S.days = JSON.parse(JSON.stringify(c.days || {}));
+  for (let d = 0; d < 7; d++) if (!Array.isArray(S.days[d])) S.days[d] = [];
+  renderDays();
+}
 
-  const box = $('#dayOffBox');
+function toMin(s) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || ''));
+  if (!m) return -1;
+  return (+m[1]) * 60 + (+m[2]);
+}
+
+function fromMin(n) {
+  n = ((n % 1440) + 1440) % 1440;
+  return String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0');
+}
+
+function renderDays() {
+  const box = $('#dayEditor');
   box.innerHTML = '';
-  for (let d = 1; d <= 7; d++) {
-    const dow = d % 7; // 1..6,0
-    const label = document.createElement('label');
-    label.className = 'chip' + ((c.dayOff || []).indexOf(dow) >= 0 ? ' on' : '');
-    label.innerHTML = '<input type="checkbox" value="' + dow + '"' +
-      ((c.dayOff || []).indexOf(dow) >= 0 ? ' checked' : '') + '><span>' + WEEK_CN[dow] + '</span>';
-    box.appendChild(label);
+
+  for (let i = 0; i < 7; i++) {
+    const dow = (i + 1) % 7;              // 周一到周日
+    const arr = S.days[dow];
+    const blk = document.createElement('div');
+    blk.className = 'day-blk';
+
+    const hd = document.createElement('div');
+    hd.className = 'day-hd';
+    hd.innerHTML = '<b>' + WEEK_CN[dow] + '</b><span>' +
+      (arr.length ? arr.length + ' 节' : '不上课') + '</span>';
+    blk.appendChild(hd);
+
+    arr.forEach((slot, idx) => {
+      const row = document.createElement('div');
+      row.className = 'slot-row';
+      row.innerHTML =
+        '<input type="time" class="s-start" value="' + (slot.start || '09:00') + '">' +
+        '<span class="s-capwrap"><input type="number" class="s-cap" min="1" max="999" value="' +
+          (slot.cap || 8) + '"><i>人</i></span>' +
+        '<label class="s-on"><input type="checkbox" class="s-open"' +
+          (slot.off ? '' : ' checked') + '>开放</label>' +
+        '<button class="btn tiny s-del" type="button">×</button>';
+
+      row.querySelector('.s-start').addEventListener('input', (e) => {
+        if (e.target.value) slot.start = e.target.value;
+      });
+      row.querySelector('.s-cap').addEventListener('input', (e) => {
+        const v = parseInt(e.target.value, 10);
+        slot.cap = Number.isFinite(v) ? Math.max(1, Math.min(999, v)) : 8;
+      });
+      row.querySelector('.s-open').addEventListener('change', (e) => {
+        if (e.target.checked) delete slot.off;
+        else slot.off = true;
+      });
+      row.querySelector('.s-del').addEventListener('click', () => {
+        arr.splice(idx, 1);
+        renderDays();
+      });
+
+      blk.appendChild(row);
+    });
+
+    const add = document.createElement('button');
+    add.className = 'btn tiny add-slot';
+    add.type = 'button';
+    add.textContent = '＋ 加一节';
+    add.addEventListener('click', () => {
+      const step = parseInt($('#cfgSlotMin').value, 10) || 60;
+      const last = arr[arr.length - 1];
+      const start = last && toMin(last.start) >= 0 ? fromMin(toMin(last.start) + step) : '14:30';
+      arr.push({ id: '', start, cap: last ? last.cap : 8 });
+      renderDays();
+    });
+    blk.appendChild(add);
+
+    box.appendChild(blk);
   }
 }
 
-function addPeriodRow(start, end, cap, id) {
-  const tr = document.createElement('tr');
-  tr.dataset.id = id || '';
-  tr.innerHTML =
-    '<td><input type="time" class="p-start" value="' + (start || '09:00') + '"></td>' +
-    '<td><input type="time" class="p-end" value="' + (end || '10:00') + '"></td>' +
-    '<td><input type="number" class="p-cap" min="1" max="999" value="' + (cap || 8) + '"></td>' +
-    '<td><button class="btn tiny del" type="button">删</button></td>';
-  tr.querySelector('.del').addEventListener('click', () => tr.remove());
-  $('#pbody').appendChild(tr);
+function copyMonToOthers() {
+  const src = S.days[1] || [];
+  if (!src.length) { $('#saveHint').textContent = '周一还没有课，先给周一加几节'; return; }
+  const names = [2, 3, 4, 5, 6, 0].map((d) => WEEK_CN[d]).join('、');
+  if (!confirm('把周一的 ' + src.length + ' 节课复制到 ' + names + '？\n\n这些天原来的设置会被覆盖。')) return;
+  [2, 3, 4, 5, 6, 0].forEach((d) => {
+    S.days[d] = JSON.parse(JSON.stringify(src)).map((x) => ({ id: '', start: x.start, cap: x.cap }));
+  });
+  renderDays();
+  $('#saveHint').textContent = '已复制，记得点下面的「保存设置」';
 }
 
 function collectConfig() {
-  const periods = [];
-  const rows = $('#pbody').querySelectorAll('tr');
-  let i = 0;
-  rows.forEach((tr) => {
-    const start = tr.querySelector('.p-start').value;
-    const end = tr.querySelector('.p-end').value;
-    const cap = parseInt(tr.querySelector('.p-cap').value, 10);
-    if (!start || !end) return;
-    // 老时段保留原 id，新时段生成新 id，历史报名才不会串格
-    const id = tr.dataset.id || ('p' + Date.now().toString(36) + (i++));
-    periods.push({ id, start, end, cap: Number.isFinite(cap) ? cap : 8 });
-  });
-
-  const dayOff = [];
-  $('#dayOffBox').querySelectorAll('input:checked').forEach((x) => {
-    dayOff.push(parseInt(x.value, 10));
-  });
-
   return {
     title: $('#cfgTitle').value.trim() || 'Hihi Studio',
     subtitle: $('#cfgSub').value,
     cancelMin: parseInt($('#cfgCancel').value, 10) || 3,
+    maxPerDay: parseInt($('#cfgMaxDay').value, 10) || 2,
+    slotMinutes: parseInt($('#cfgSlotMin').value, 10) || 60,
     showStats: !!$('#cfgShowStats').checked,
-    periods,
-    dayOff,
-    override: (S.cfg && S.cfg.override) || {}
+    days: S.days
   };
+}
+
+function validateConfig(cfg) {
+  const step = cfg.slotMinutes;
+  let total = 0;
+
+  for (let d = 0; d < 7; d++) {
+    const arr = cfg.days[d] || [];
+    const open = [];
+
+    for (const slot of arr) {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(slot.start || ''))) {
+        return WEEK_CN[d] + ' 有个时间没填对';
+      }
+      const m = toMin(slot.start);
+      if (m + step > 1440) {
+        return WEEK_CN[d] + ' ' + slot.start + ' 开始的话，下课会到第二天凌晨';
+      }
+      if (!slot.off) { open.push(m); total++; }
+    }
+
+    open.sort((a, b) => a - b);
+    for (let i = 1; i < open.length; i++) {
+      if (open[i] - open[i - 1] < step) {
+        return WEEK_CN[d] + ' ' + fromMin(open[i - 1]) + ' 和 ' + fromMin(open[i]) +
+               ' 时间重叠了（每节 ' + step + ' 分钟）';
+      }
+    }
+  }
+
+  if (!total) return '整周都没课，至少给某一天加一节';
+  return '';
 }
 
 async function saveConfig() {
   const next = collectConfig();
-  if (!next.periods.length) { $('#saveHint').textContent = '至少留一个时间段'; return; }
+  const bad = validateConfig(next);
+  if (bad) { $('#saveHint').textContent = bad; return; }
 
   $('#saveBtn').disabled = true;
   $('#saveHint').textContent = '保存中…';
@@ -169,6 +249,8 @@ async function saveConfig() {
     $('#saveBtn').disabled = false;
   }
 }
+
+$('#copyMon').addEventListener('click', copyMonToOthers);
 
 /* ---------------- 报名管理 ---------------- */
 
@@ -388,7 +470,6 @@ function resetPwd() {
 $('#loginBtn').addEventListener('click', login);
 $('#pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
 
-$('#addPeriod').addEventListener('click', () => addPeriodRow('09:00', '10:00', 8, ''));
 $('#saveBtn').addEventListener('click', saveConfig);
 
 const TABS = ['manage', 'schedule', 'roster'];

@@ -1,4 +1,4 @@
-/* 报名工具 · 网格渲染（会员页和管理页共用） */
+/* 报名工具 · 网格渲染 v1.1（节次竖直、时间在格子里） */
 
 (function () {
   function esc(s) {
@@ -8,6 +8,7 @@
   }
 
   function cellClass(cell, past) {
+    if (cell.empty) return 'c is-none';
     const cls = ['c'];
     if (past) cls.push('is-past');
     else if (cell.off) cls.push('is-off');
@@ -19,11 +20,17 @@
     return cls.join(' ');
   }
 
-  // 空格子留白（白底=空位可报），「—」只表示这个时段不开课
-  function cellText(cell, past) {
-    if (cell.off) return '—';
-    if (cell.count > 0) return cell.count + '/' + cell.cap;
-    return '';
+  // 上排开始时间（常规浅灰 / 与这行不同则深色加粗），下排已报/名额
+  function cellInner(cell) {
+    if (cell.empty) return '<i class="ct-none">—</i>';
+
+    const t = '<b class="ct-t' + (cell.odd ? ' odd' : '') + '">' + esc(cell.start) + '</b>';
+
+    let n = '';
+    if (cell.off) n = '—';
+    else if (cell.count > 0) n = cell.count + '/' + cell.cap;
+
+    return t + '<em class="ct-n' + (cell.off ? ' is-off' : '') + '">' + (n || '·') + '</em>';
   }
 
   function weekTable(w, onCell) {
@@ -48,24 +55,24 @@
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    const periodCount = (w.days[0] && w.days[0].cells.length) || 0;
+    const rows = (w.days[0] && w.days[0].cells.length) || 0;
 
-    for (let pi = 0; pi < periodCount; pi++) {
+    for (let ri = 0; ri < rows; ri++) {
       const tr = document.createElement('tr');
-      const ref = w.days[0].cells[pi];
 
       const tc = document.createElement('th');
       tc.className = 'tc';
-      const parts = String(ref.time || '').split('-');
-      tc.innerHTML = '<b>' + esc(parts[0] || '') + '</b><span>' + esc(parts[1] || '') + '</span>';
+      tc.innerHTML = '<b>' + (ri + 1) + '</b>';
       tr.appendChild(tc);
 
       w.days.forEach((day) => {
-        const cell = day.cells[pi];
+        const cell = day.cells[ri] || { empty: true };
         const td = document.createElement('td');
         td.className = cellClass(cell, day.past);
-        td.textContent = cellText(cell, day.past);
-        td.addEventListener('click', () => { if (onCell) onCell(day, cell); });
+        td.innerHTML = cellInner(cell);
+        if (!cell.empty) {
+          td.addEventListener('click', () => { if (onCell) onCell(day, cell); });
+        }
         tr.appendChild(td);
       });
 
@@ -92,6 +99,7 @@
       '<span><i class="lg lg-full"></i>已满</span>' +
       '<span><i class="lg lg-some"></i>有人报</span>' +
       '<span><i class="lg lg-empty"></i>空着</span>' +
+      '<span><i class="lg lg-off"></i>不上课</span>' +
       '<span><i class="lg lg-past"></i>已过期</span>' +
       '<span><i class="lg lg-mine"></i>我报了</span>';
     return el;
