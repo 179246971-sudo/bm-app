@@ -29,8 +29,7 @@ function defaultDays() {
 
 const DEFAULTS = {
   title: 'Hihi Studio',
-  subtitle: '点格子报名 · 报名后 3 分钟内可取消',
-  cancelMin: 3,
+  subtitle: '点格子报名 · 开课时扣 1 次',
   maxPerDay: 2,
   showStats: true,
   slotMinutes: 60,
@@ -168,7 +167,6 @@ function normalizeConfig(raw) {
   return {
     title: String(c.title || DEFAULTS.title).slice(0, 40),
     subtitle: String(c.subtitle === undefined ? DEFAULTS.subtitle : c.subtitle).slice(0, 80),
-    cancelMin: intIn(c.cancelMin, 1, 120, 3),
     maxPerDay: intIn(c.maxPerDay, 1, 20, 2),
     showStats: c.showStats !== false,
     slotMinutes: intIn(c.slotMinutes, 15, 300, 60),
@@ -541,7 +539,6 @@ async function loadBoard(env, cfg, who, clientId) {
     };
   }
 
-  const cancelMs = cfg.cancelMin * 60000;
 
   let wallet = null;
   if (myName) {
@@ -634,7 +631,6 @@ async function loadBoard(env, cfg, who, clientId) {
     title: cfg.title,
     subtitle: cfg.subtitle,
     now, today: todayStr,
-    cancelMin: cfg.cancelMin,
     maxPerDay: cfg.maxPerDay,
     slotMinutes: cfg.slotMinutes,
     cancelBeforeHour: cfg.cancelBeforeHour,
