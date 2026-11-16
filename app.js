@@ -128,19 +128,6 @@ function render() {
     }
   }
 
-  const statsBox = $('#stats');
-  if (statsBox) {
-    if (d.stats) {
-      $('#statWeek').textContent = d.stats.week || 0;
-      $('#statMonth').textContent = d.stats.month || 0;
-      const yEl = $('#statYear');
-      if (yEl) yEl.textContent = d.stats.year || 0;
-      statsBox.hidden = false;
-    } else {
-      statsBox.hidden = true;
-    }
-  }
-
   const board = $('#board');
   Grid.renderGrid(board, d, { onCell: openDialog });
   board.appendChild(Grid.buildLegend());
@@ -372,8 +359,10 @@ function renderMine(m) {
     h += '<div class="mine-sub">另有 ' + m.wallet.pending + ' 节课还没上，开课时会扣</div>';
   }
 
-  h += '<div class="mine-stats">本周 <b>' + m.stats.week + '</b> 次 · 本月 <b>' +
-       m.stats.month + '</b> 次 · 今年 <b>' + m.stats.year + '</b> 次</div>';
+  if (m.stats) {
+    h += '<div class="mine-stats">本周 <b>' + m.stats.week + '</b> 次 · 本月 <b>' +
+         m.stats.month + '</b> 次 · 今年 <b>' + m.stats.year + '</b> 次</div>';
+  }
 
   h += '<div class="mine-quota">';
   m.weeks.forEach((w) => {
@@ -409,3 +398,56 @@ function renderMine(m) {
   dlg.innerHTML = h;
   dlg.querySelector('[data-act="close"]').addEventListener('click', closeDialog);
 }
+
+/* ---------------- 报名规则 ---------------- */
+
+function ruleRow(n, title, desc) {
+  return '<div class="rule-row"><i>' + n + '</i>' +
+    '<div><b>' + title + '</b><span>' + desc + '</span></div></div>';
+}
+
+// 名额、取消次数、截止钟点都是后台可配的，规则里实时读出来，不写死
+function ruleNums() {
+  const d = state.data || {};
+  const caps = new Set();
+  (d.weeks || []).forEach((w) => w.days.forEach((dy) => dy.cells.forEach((c) => {
+    if (!c.empty && !c.off && c.cap > 0) caps.add(c.cap);
+  })));
+  const arr = [...caps];
+  return {
+    cap: arr.length === 1 ? (arr[0] + ' 人') : '',
+    quota: d.cancelQuota === undefined ? 2 : d.cancelQuota,
+    hour: d.cancelBeforeHour === undefined ? 21 : d.cancelBeforeHour
+  };
+}
+
+function openRules() {
+  if (!state.data) return;
+  closeDialog();
+
+  const n = ruleNums();
+  const capLine = n.cap
+    ? '每课时最多允许 ' + n.cap + ' 报名，请按需要提前占位'
+    : '每课时有名额上限（以格子上的数字为准），请提前占位';
+
+  const dlg = $('#dialog');
+  dlg.innerHTML =
+    '<div class="dlg-h">报名规则</div>' +
+    '<div class="rules">' +
+      ruleRow('1', '点格子报名', capLine) +
+      ruleRow('2', '取消机会有限', '每周有且仅有 <b>' + n.quota + ' 次</b>提前取消报名的机会') +
+      ruleRow('3', '取消要趁早', '开课前一天 <b>' + n.hour + ':00</b> 后，不可取消次日课程') +
+      ruleRow('4', '开课即扣次', '已成功报名（含未成功取消）的课程，开课后即扣减 <b>1 次</b>课卡') +
+      ruleRow('5', '取消不扣次', '在允许时间内取消成功，这节课不扣次，名额立即释放给其他人') +
+      ruleRow('6', '次数要先够', '可用次数 = 剩余次数 − 还没上的课，不够就报不了名') +
+      ruleRow('7', '红色就是满了', '名额满员只能等别人取消，空不出位置就报不上') +
+    '</div>' +
+    '<div class="rules-tip">点了「确认报名」就代表你已读并同意以上规则</div>' +
+    '<div class="dlg-btns"><button class="btn" type="button" data-act="close">知道了</button></div>';
+
+  dlg.querySelector('[data-act="close"]').addEventListener('click', closeDialog);
+  $('#mask').hidden = false;
+}
+
+const subEl = $('#sub');
+if (subEl) subEl.addEventListener('click', openRules);

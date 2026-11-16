@@ -70,7 +70,6 @@ function enterApp() {
   loadConfig();
   loadBoard();
   loadRoster();
-  loadCards();
   loadStats();
 }
 
@@ -472,7 +471,7 @@ $('#pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); }
 
 $('#saveBtn').addEventListener('click', saveConfig);
 
-const TABS = ['home', 'manage', 'schedule', 'roster'];
+const TABS = ['home', 'manage', 'schedule', 'roster', 'sys'];
 document.querySelectorAll('.tab').forEach((t) => {
   t.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach((x) => x.classList.remove('on'));
@@ -480,6 +479,7 @@ document.querySelectorAll('.tab').forEach((t) => {
     TABS.forEach((id) => { $('#tab-' + id).hidden = t.dataset.tab !== id; });
     if (t.dataset.tab === 'roster') loadRoster();
     if (t.dataset.tab === 'home') loadStats();
+    if (t.dataset.tab === 'sys') { loadCards(); loadLogs(); }
   });
 });
 
@@ -937,3 +937,63 @@ function renderStats(s) {
 
   $('#homeBox').innerHTML = h;
 }
+
+/* ==================== 系统日志 ==================== */
+
+async function loadLogs() {
+  const box = $('#logList');
+  if (!box) return;
+  try {
+    const r = await api('/admin/logs');
+    renderLogs(r.logs || []);
+  } catch (e) {
+    box.innerHTML = '<div class="err">读取失败：' + Grid.esc(e.message) + '</div>';
+  }
+}
+
+function fmtLogTime(ts) {
+  const d = new Date(ts);
+  const p2 = (n) => String(n).padStart(2, '0');
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+}
+
+function renderLogs(list) {
+  const box = $('#logList');
+  if (!list.length) {
+    box.innerHTML = '<div class="none" style="padding:12px;color:#8b9099">还没有操作记录</div>';
+    return;
+  }
+  box.innerHTML = '';
+  list.forEach((x) => {
+    const el = document.createElement('div');
+    el.className = 'log-row';
+    el.innerHTML =
+      '<span class="lt">' + fmtLogTime(x.created_at) + '</span>' +
+      '<b class="la">' + Grid.esc(x.action) + '</b>' +
+      '<span class="ltg">' + Grid.esc(x.target || '') + '</span>' +
+      '<span class="ld">' + Grid.esc(x.detail || '') + '</span>';
+    box.appendChild(el);
+  });
+}
+
+async function exportLogs() {
+  try {
+    const r = await fetch('/api/admin/export-logs', { headers: { 'x-admin-key': S.key } });
+    if (!r.ok) { alert('导出失败，请重新登录'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '系统日志.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    $('#logHint').textContent = '已导出';
+  } catch (e) {
+    alert('导出失败：' + e.message);
+  }
+}
+
+$('#logRefresh').addEventListener('click', loadLogs);
+$('#logExport').addEventListener('click', exportLogs);

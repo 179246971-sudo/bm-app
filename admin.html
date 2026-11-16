@@ -6,7 +6,7 @@
   <meta name="format-detection" content="telephone=no">
   <meta name="robots" content="noindex,nofollow">
   <title>Hihi Studio · 管理后台</title>
-  <link rel="stylesheet" href="style.css?v=11">
+  <link rel="stylesheet" href="style.css?v=14">
 </head>
 <body class="admin">
 
@@ -48,7 +48,8 @@
         <button class="tab on" data-tab="home">概览</button>
         <button class="tab" data-tab="manage">报名管理</button>
         <button class="tab" data-tab="schedule">课表设置</button>
-        <button class="tab" data-tab="roster">名单</button>
+        <button class="tab" data-tab="roster">会员管理</button>
+        <button class="tab" data-tab="sys">系统管理</button>
       </nav>
 
       <!-- 概览 -->
@@ -108,12 +109,6 @@
         <p class="tip">只有名单里的人、并且拿着对应入场码，才能进来看课表和报名。链接转发给别人也进不来。</p>
 
         <div class="fld">
-          <label>次卡模板（充值时直接选，不用手填次数）</label>
-          <div id="cardList" class="card-list"><div class="loading">加载中…</div></div>
-          <button id="cardAdd" class="btn small" type="button">＋ 新建次卡</button>
-        </div>
-
-        <div class="fld">
           <label>批量添加（一行一个名字，也可以整列粘贴）</label>
           <textarea id="rosterInput" class="inp roster-ta" rows="5"
                     placeholder="小林&#10;阿May&#10;陈工"></textarea>
@@ -132,6 +127,22 @@
           <button id="exportNext" class="btn small" type="button">导出下周</button>
         </div>
       </div>
+      <!-- 系统管理 -->
+      <div id="tab-sys" hidden>
+        <div class="fld">
+          <label>次卡模板（充值时直接选，不用手填次数）</label>
+          <div id="cardList" class="card-list"><div class="loading">加载中…</div></div>
+          <button id="cardAdd" class="btn small" type="button">＋ 新建次卡</button>
+        </div>
+
+        <div class="fld">
+          <label>系统日志（后台操作记录，最新 200 条）</label>
+          <div id="logList" class="log-list"><div class="loading">加载中…</div></div>
+          <button id="logRefresh" class="btn small" type="button">刷新</button>
+          <button id="logExport" class="btn small" type="button">导出 CSV</button>
+          <div class="hint" id="logHint"></div>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -139,7 +150,7 @@
     <div class="dialog" id="dialog" role="dialog" aria-modal="true"></div>
   </div>
 
-  <script src="grid.js?v=11"></script>
-  <script src="admin.js?v=11"></script>
+  <script src="grid.js?v=14"></script>
+  <script src="admin.js?v=14"></script>
 </body>
 </html>
