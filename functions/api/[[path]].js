@@ -29,7 +29,7 @@ function defaultDays() {
 
 const DEFAULTS = {
   title: 'Hihi Studio',
-  subtitle: '点格子报名 · 开课时扣 1 次',
+  subtitle: '点开格子，点亮精彩',
   maxPerDay: 2,
   showStats: true,
   slotMinutes: 60,
@@ -177,7 +177,10 @@ function normalizeConfig(raw) {
   };
 }
 
-const OLD_SUBTITLE = '点格子报名 · 报名后 3 分钟内可取消';
+const OLD_SUBTITLES = [
+  '点格子报名 · 报名后 3 分钟内可取消',
+  '点格子报名 · 开课时扣 1 次'
+];
 
 async function getConfig(env) {
   try {
@@ -185,7 +188,7 @@ async function getConfig(env) {
     if (row && row.value) {
       const cfg = normalizeConfig(JSON.parse(row.value));
       // 老版本存在库里的默认副标题（提到"3 分钟"）自动换成新的，只替换完全一致的那种
-      if (cfg.subtitle === OLD_SUBTITLE) {
+      if (OLD_SUBTITLES.indexOf(cfg.subtitle) >= 0) {
         cfg.subtitle = DEFAULTS.subtitle;
         await saveConfig(env, cfg);
       }
@@ -393,6 +396,40 @@ function findSlot(cfg, dow, slotId) {
     if (arr[i].id === slotId) return { slot: arr[i], index: i };
   }
   return null;
+}
+
+/* ==================== 后台操作日志 ==================== */
+
+async function audit(env, action, target, detail) {
+  try {
+    await env.DB.prepare(
+      'INSERT INTO admin_log (action, target, detail, created_at) VALUES (?1,?2,?3,?4)'
+    ).bind(String(action || ''), String(target || '').slice(0, 40),
+           String(detail || '').slice(0, 120), Date.now()).run();
+  } catch (e) { /* 日志写失败不影响主流程 */ }
+}
+
+async function adminLogs(env, limit) {
+  try {
+    const r = await env.DB.prepare(
+      'SELECT action, target, detail, created_at FROM admin_log ORDER BY id DESC LIMIT ?1'
+    ).bind(limit).all();
+    return { logs: r.results || [] };
+  } catch (e) { return { logs: [] }; }
+}
+
+async function adminExportLogs(env) {
+  const out = await adminLogs(env, 2000);
+  const rows = [['时间', '动作', '对象', '详情']];
+  for (const x of out.logs) {
+    const d = new Date(x.created_at + 8 * 3600000);
+    const t = d.toISOString().replace('T', ' ').slice(0, 19);
+    rows.push([t, x.action, x.target || '', x.detail || '']);
+  }
+  const csv = rows.map((r) =>
+    r.map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(',')
+  ).join('\r\n');
+  return { csv: '\uFEFF' + csv, filename: 'admin_log.csv' };
 }
 
 /* ==================== 名单 / 入场码 ==================== */
@@ -724,7 +761,7 @@ async function memberProfile(env, cfg, who) {
   return {
     nick: who.nick,
     wallet: { credits, pending, available: credits - pending },
-    stats: { week: weekN, month: monthN, year: yearN },
+    stats: cfg.showStats ? { week: weekN, month: monthN, year: yearN } : null,
     weeks: [
       {
         label: '本周',
@@ -910,6 +947,7 @@ async function adminSign(env, cfg, body) {
     throw e;
   }
   if (!res.meta || !res.meta.changes) return { error: '名额已满（上限 ' + cc.cap + ' 人）' };
+  await audit(env, '代报名', nick, date + ' ' + cc.start);
   return { ok: true };
 }
 
@@ -951,6 +989,8 @@ async function adminRemove(env, cfg, body) {
     } catch (e) { /* 忽略 */ }
   }
 
+  await audit(env, '删报名', nick,
+    date + ' ' + cc.start + (refunded ? '（退 1 次）' : (consumed ? '（未退次）' : '')));
   return { ok: true, refunded, hadConsumed: !!consumed };
 }
 
@@ -1133,6 +1173,9 @@ async function adminWallet(env, body) {
   const note = String((body && body.note) || '').slice(0, 60);
 
   const after = await dbAdd(env, nick, delta, kind, amount, note);
+  const KINDTXT = { recharge: '充值', refund: '退款', adjust: '调整' };
+  await audit(env, KINDTXT[kind] || kind, nick,
+    (delta > 0 ? '+' : '') + delta + ' 次' + (note ? '｜' + note : '') + '（余 ' + after + '）');
   return { ok: true, credits: after };
 }
 
@@ -1160,6 +1203,7 @@ async function adminCardSave(env, body) {
   if (Number.isFinite(id) && id > 0) {
     await env.DB.prepare('UPDATE cards SET name = ?1, credits = ?2, price = ?3 WHERE id = ?4')
       .bind(name, credits, price, id).run();
+    await audit(env, '改次卡', name, credits + ' 次 / ¥' + price);
     return { ok: true, id };
   }
 
@@ -1167,6 +1211,7 @@ async function adminCardSave(env, body) {
     'INSERT INTO cards (name, credits, price, active, created_at) VALUES (?1,?2,?3,1,?4)'
   ).bind(name, credits, price, Date.now()).run();
 
+  await audit(env, '建次卡', name, credits + ' 次 / ¥' + price);
   return { ok: true };
 }
 
@@ -1174,6 +1219,7 @@ async function adminCardRemove(env, body) {
   const id = parseInt(body && body.id, 10);
   if (!Number.isFinite(id)) return { error: '缺少 id' };
   await env.DB.prepare('DELETE FROM cards WHERE id = ?1').bind(id).run();
+  await audit(env, '删次卡', 'id ' + id, '');
   return { ok: true };
 }
 
@@ -1198,6 +1244,7 @@ async function adminLimit(env, cfg, body) {
     'INSERT INTO week_limits (nick, week_start, limits) VALUES (?1,?2,?3) ' +
     'ON CONFLICT(nick, week_start) DO UPDATE SET limits = excluded.limits'
   ).bind(nick, ws, v).run();
+  await audit(env, '提额', nick, ws + ' 这周可报 ' + v + ' 节');
   return { ok: true, limits: v };
 }
 
@@ -1215,6 +1262,7 @@ async function adminPerson(env, body) {
   } catch (e) {
     return { error: '数据库还没加 phone / memo 列，请先执行 schema.sql 里的 ALTER 语句' };
   }
+  await audit(env, '资料', nick, (phone ? '手机 ' + phone : '') + (memo ? ' 备注 ' + memo : ''));
   return { ok: true };
 }
 
@@ -1248,6 +1296,7 @@ async function adminRosterAdd(env, body) {
     added.push(nick);
   }
 
+  await audit(env, '加会员', added.join('、').slice(0, 40), '新增 ' + added.length + ' 人');
   return { ok: true, added, skipped };
 }
 
@@ -1262,6 +1311,7 @@ async function adminRosterRotate(env, body) {
   try {
     await env.DB.prepare('DELETE FROM roster_devices WHERE code = ?1').bind(r.code).run();
   } catch (e) { /* 忽略 */ }
+  await audit(env, '换入场码', nick, '旧码 ' + r.code + ' → 新码 ' + code);
   return { ok: true, code };
 }
 
@@ -1278,6 +1328,7 @@ async function adminRosterRemove(env, body) {
     const res = await env.DB.prepare('DELETE FROM signups WHERE nickname = ?1').bind(nick).run();
     removed = (res.meta && res.meta.changes) || 0;
   }
+  await audit(env, '移出会员', nick, body && body.clearSignups ? '并删除报名 ' + removed + ' 条' : '保留报名');
   return { ok: true, removedSignups: removed };
 }
 
@@ -1287,6 +1338,7 @@ async function adminRosterRestore(env, body) {
   const r = await rosterByNick(env, nick);
   if (!r) return { error: '名单里没有这个人' };
   await env.DB.prepare('UPDATE roster SET disabled = 0 WHERE nick = ?1').bind(nick).run();
+  await audit(env, '恢复会员', nick, '');
   return { ok: true };
 }
 
@@ -1302,6 +1354,7 @@ async function adminRename(env, body) {
 
   await env.DB.prepare('UPDATE roster SET nick = ?1 WHERE nick = ?2').bind(newNick, nick).run();
   await env.DB.prepare('UPDATE signups SET nickname = ?1 WHERE nickname = ?2').bind(newNick, nick).run();
+  await audit(env, '改名', nick + ' → ' + newNick, '报名记录同步');
   return { ok: true };
 }
 
@@ -1398,6 +1451,7 @@ export async function onRequest(context) {
         const body = await request.json().catch(() => ({}));
         const next = normalizeConfig(body.config || {});
         await saveConfig(env, next);
+        await audit(env, '课表设置', 'schedule', '标题/时长/每天时段/名额');
         return json({ ok: true, config: next });
       }
       if (path === 'admin/board') return json(await loadBoard(env, cfg, null, ''));
@@ -1407,6 +1461,19 @@ export async function onRequest(context) {
       if (path === 'admin/roster') return json(await adminRoster(env));
       if (path === 'admin/cards') return json(await adminCards(env));
       if (path === 'admin/stats') return json(await adminStats(env, cfg));
+      if (path === 'admin/logs') return json(await adminLogs(env, 200));
+
+      if (path === 'admin/export-logs') {
+        const out = await adminExportLogs(env);
+        return new Response(out.csv, {
+          status: 200,
+          headers: {
+            'content-type': 'text/csv; charset=utf-8',
+            'content-disposition': 'attachment; filename="' + out.filename + '"',
+            'cache-control': 'no-store'
+          }
+        });
+      }
 
       if (path === 'admin/export') {
         const out = await adminExport(env, cfg, url.searchParams.get('week') === '1' ? 1 : 0);
