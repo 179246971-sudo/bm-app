@@ -120,7 +120,7 @@ function render() {
   if (meEl) {
     if (d.myName) {
       const bal = d.wallet ? d.wallet.available : null;
-      meEl.textContent = '我是 ' + d.myName + (bal === null ? '' : ' · ' + bal + ' 次');
+      meEl.textContent = '我是 ' + d.myName + (bal === null ? '' : ' · 余 ' + bal + ' 次');
       meEl.hidden = false;
       meEl.className = 'me-badge' + (bal !== null && bal <= 2 ? ' is-low' : '');
     } else {

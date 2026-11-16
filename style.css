@@ -613,14 +613,15 @@ body.admin { padding-bottom: 24px; }
 /* ---------- 页顶：我是 XX ---------- */
 .hd-top {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 10px;
 }
 .hd-l { min-width: 0; }
 .me-badge {
   flex: none;
-  margin-top: 3px;
+  margin-top: 0;
+  margin-bottom: 1px;
   max-width: 46%;
   overflow: hidden;
   text-overflow: ellipsis;
