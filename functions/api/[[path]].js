@@ -177,10 +177,20 @@ function normalizeConfig(raw) {
   };
 }
 
+const OLD_SUBTITLE = '点格子报名 · 报名后 3 分钟内可取消';
+
 async function getConfig(env) {
   try {
     const row = await env.DB.prepare('SELECT value FROM config WHERE key = ?1').bind('schedule').first();
-    if (row && row.value) return normalizeConfig(JSON.parse(row.value));
+    if (row && row.value) {
+      const cfg = normalizeConfig(JSON.parse(row.value));
+      // 老版本存在库里的默认副标题（提到"3 分钟"）自动换成新的，只替换完全一致的那种
+      if (cfg.subtitle === OLD_SUBTITLE) {
+        cfg.subtitle = DEFAULTS.subtitle;
+        await saveConfig(env, cfg);
+      }
+      return cfg;
+    }
   } catch (e) { /* 表还没建 */ }
   return normalizeConfig(DEFAULTS);
 }
