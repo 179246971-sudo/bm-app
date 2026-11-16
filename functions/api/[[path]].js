@@ -971,6 +971,8 @@ async function adminRemove(env, cfg, body) {
   const found = findSlot(cfg, p.dow, slotId);
   if (!found) return { error: '没有这个时段' };
 
+  const cc = resolveCell(p, found.slot, cfg);
+
   // 管理员可以删已开课的报名（会员自己不能，只能找管理员）
   // 已开课的那节如果扣过次，删的时候可选退还
   // 先看这节是不是已经扣过次
@@ -999,7 +1001,8 @@ async function adminRemove(env, cfg, body) {
   }
 
   await audit(env, '删报名', nick,
-    date + ' ' + cc.start + (refunded ? '（退 1 次）' : (consumed ? '（未退次）' : '')));
+    date + ' ' + (cc ? cc.start : found.slot.start) +
+    (refunded ? '（退 1 次）' : (consumed ? '（未退次）' : '')));
   return { ok: true, refunded, hadConsumed: !!consumed };
 }
 
