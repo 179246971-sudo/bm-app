@@ -4,16 +4,39 @@ const $ = (s) => document.querySelector(s);
 const esc = Grid.esc;
 const WEEK_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
+const SESSION_MS = 24 * 3600 * 1000;
+
 const S = {
   key: (() => { try { return sessionStorage.getItem('bm_admin_key') || ''; } catch (e) { return ''; } })(),
   cfg: null,
   board: null,
-  editing: null
+  editing: null,
+  people: [],
+  showRemoved: false
 };
 
 function setKey(k) {
   S.key = k;
-  try { sessionStorage.setItem('bm_admin_key', k); } catch (e) { /* 忽略 */ }
+  try {
+    sessionStorage.setItem('bm_admin_key', k);
+    sessionStorage.setItem('bm_admin_at', String(Date.now()));
+  } catch (e) { /* 忽略 */ }
+}
+
+function sessionExpired() {
+  try {
+    const t = parseInt(sessionStorage.getItem('bm_admin_at') || '0', 10);
+    if (!t) return true;                       // 老版本留下的会话，没有时间戳，按过期处理
+    return Date.now() - t > SESSION_MS;
+  } catch (e) { return false; }
+}
+
+function clearKey() {
+  S.key = '';
+  try {
+    sessionStorage.removeItem('bm_admin_key');
+    sessionStorage.removeItem('bm_admin_at');
+  } catch (e) { /* 忽略 */ }
 }
 
 async function api(path, body) {
@@ -303,12 +326,9 @@ function renderCellDialog(d) {
         '<span class="pname">' + esc(p.nickname) + '</span>' +
         (p.byAdmin ? '<i class="pbadge">代报</i>' : '') +
         '<span class="ptime">' + hhmm(p.at) + '</span>' +
-        '<button class="btn tiny" data-rn="' + esc(p.clientId) +
+        '<button class="btn tiny" data-rn="' + esc(p.nickname) +
         '" data-name="' + esc(p.nickname) + '">改名</button>' +
-        '<button class="btn tiny" data-rs="' + esc(p.clientId) + '">重置</button>' +
-        (d.editable
-          ? '<button class="btn tiny del" data-rm="' + esc(p.clientId) + '">移除</button>'
-          : '') +
+        '<button class="btn tiny del" data-rm="' + esc(p.nickname) + '">移除</button>' +
         '</div>';
     });
     html += '</div>';
@@ -322,9 +342,10 @@ function renderCellDialog(d) {
     html += '<div class="dlg-note">名额已满（上限 ' + d.cap + ' 人），删掉一个才能再加。</div>';
   } else {
     html += '<div class="addrow">' +
-      '<input id="addName" class="inp" placeholder="给谁代报？填昵称" maxlength="12">' +
+      '<input id="addName" class="inp" placeholder="给谁代报？填一个字或昵称" maxlength="12" autocomplete="off">' +
       '<button class="btn primary" data-act="add">加进去</button>' +
       '</div>' +
+      '<div id="addSuggest" class="suggest" hidden></div>' +
       '<div class="hint" id="cellHint"></div>';
   }
 
@@ -338,9 +359,6 @@ function renderCellDialog(d) {
   box.querySelectorAll('[data-rn]').forEach((b) => {
     b.addEventListener('click', () => renamePerson(b.dataset.rn, b.dataset.name));
   });
-  box.querySelectorAll('[data-rs]').forEach((b) => {
-    b.addEventListener('click', () => resetRenames(b.dataset.rs));
-  });
   box.querySelectorAll('[data-act]').forEach((b) => {
     b.addEventListener('click', () => {
       const act = b.dataset.act;
@@ -348,6 +366,20 @@ function renderCellDialog(d) {
       if (act === 'add') addPerson();
     });
   });
+
+  // 代报名输入框：打一个字/字母就列出匹配的昵称
+  const addEl = $('#addName');
+  const sugEl = $('#addSuggest');
+  if (addEl && sugEl) {
+    addEl.addEventListener('input', () => {
+      const q = addEl.value.trim();
+      if (!q) { sugEl.hidden = true; sugEl.innerHTML = ''; return; }
+      const names = (S.people || [])
+        .filter((x) => !x.disabled && x.nick.toLowerCase().indexOf(q.toLowerCase()) >= 0)
+        .map((x) => x.nick);
+      renderSuggest(sugEl, names, (n) => { addEl.value = n; sugEl.hidden = true; });
+    });
+  }
 }
 
 function bindClose() {
@@ -362,47 +394,42 @@ function closeDialog() {
   S.editing = null;
 }
 
-async function removePerson(clientId) {
+async function removePerson(nick) {
   const d = S.editing;
-  if (!d) return;
-  if (!confirm('确定把这个人从「' + d.weekday + ' ' + d.time + '」里移除？')) return;
+  if (!d || !nick || nick === 'undefined') return;
+  if (!confirm('确定把「' + nick + '」从「' + d.weekday + ' ' + d.md + ' · ' + d.time + '」里移除？')) return;
+
+  let refund = false;
+  if (d.started) {
+    refund = confirm('这一节已经开课、扣过他 1 次了。\n\n要退还这 1 次吗？\n\n点「确定」= 退还\n点「取消」= 不退');
+  }
 
   try {
-    await api('/admin/remove', { date: d.date, slotId: d.slotId, clientId });
+    const r = await api('/admin/remove', {
+      date: d.date, slotId: d.slotId, nickname: nick, refund
+    });
     await refreshCell();
+    if (r.refunded) alert('已移除「' + nick + '」，并退还 1 次');
   } catch (e) {
     alert('移除失败：' + e.message);
   }
 }
 
-async function renamePerson(clientId, oldName) {
-  const v = prompt(
-    '把「' + oldName + '」改成什么名字？\n\n' +
-    '· 他名下所有报名记录会一起改名\n' +
-    '· 改完会锁死他「自己改名」的机会（要放开就点「重置」）',
-    oldName
-  );
+async function renamePerson(nick, oldName) {
+  if (!nick || nick === 'undefined') return;
+  const v = prompt('把「' + oldName + '」改成什么名字？\n\n他名下所有报名记录会一起改名。', oldName);
   if (v == null) return;
   const name = v.trim().slice(0, 12);
   if (!name || name === oldName) return;
 
   try {
-    await api('/admin/rename', { clientId, nickname: name });
+    await api('/admin/rename', { nick, newNick: name });
     await refreshCell();
     loadBoard();
-    alert('已改成「' + name + '」。\n他那边打开会自动变过来，并且不能再自己改名。');
+    loadRoster();
+    alert('已改成「' + name + '」');
   } catch (e) {
     alert('改名失败：' + e.message);
-  }
-}
-
-async function resetRenames(clientId) {
-  if (!confirm('把这个人的「自己改名」次数恢复成 2 次？')) return;
-  try {
-    await api('/admin/resetrenames', { clientId });
-    alert('已恢复，他可以自己再改 2 次了');
-  } catch (e) {
-    alert('重置失败：' + e.message);
   }
 }
 
@@ -442,7 +469,7 @@ function backToLogin() {
   $('#loginPanel').hidden = false;
   $('#loginHint').textContent = '登录已失效，请重新输入密码';
   resetPwd();
-  try { sessionStorage.removeItem('bm_admin_key'); } catch (e) { /* 忽略 */ }
+  clearKey();
 }
 
 $('#pwdEye').addEventListener('click', () => {
@@ -489,9 +516,15 @@ $('#mask').addEventListener('click', (e) => {
 
 // 有会话里的密码就直接进
 if (S.key) {
-  api('/admin/config')
-    .then(() => enterApp())
-    .catch(() => backToLogin());
+  if (sessionExpired()) {
+    clearKey();
+    backToLogin();
+    $('#loginHint').textContent = '登录已超过 24 小时，请重新输入密码';
+  } else {
+    api('/admin/config')
+      .then(() => enterApp())
+      .catch(() => backToLogin());
+  }
 }
 
 /* ==================== 名单 ==================== */
@@ -512,16 +545,74 @@ async function loadRoster() {
   if (!box) return;
   try {
     const r = await api('/admin/roster');
-    renderRoster(r.people || []);
+    S.people = r.people || [];
+    renderRoster(S.people);
   } catch (e) {
     if (e.status === 401) { backToLogin(); return; }
     box.innerHTML = '<div class="err">读取失败：' + esc(e.message) + '</div>';
   }
 }
 
+function buildRow(p) {
+  const el = document.createElement('div');
+  el.className = 'rrow' + (p.disabled ? ' is-off' : '');
+  el.dataset.nick = p.nick;
+
+  const devTag = (!p.disabled && p.devices > 1)
+    ? '<i class="badge-warn">' + p.devices + ' 台设备</i>'
+    : (p.devices ? p.devices + ' 台设备' : '未入场');
+
+  const bal = p.credits === undefined ? 0 : p.credits;
+
+  el.innerHTML =
+    '<span class="rname">' + esc(p.nick) + '</span>' +
+    '<span class="rcode">' + esc(p.code) + '</span>' +
+    '<span class="rmeta">' +
+      '<b class="rbal' + (bal <= 2 ? ' is-low' : '') + '">' + bal + ' 次</b>' +
+      ' · ' + devTag + ' · 报名 ' + p.signups + ' 次' +
+      (p.phone ? ' · ' + esc(p.phone) : '') +
+      (p.memo ? ' · ' + esc(p.memo) : '') +
+    '</span>' +
+    '<span class="racts">' +
+      '<button class="btn tiny" type="button" data-copy="' + esc(p.code) + '">复制链接</button>' +
+      '<button class="btn tiny" type="button" data-money="' + esc(p.nick) + '">充值</button>' +
+      '<button class="btn tiny" type="button" data-limit="' + esc(p.nick) + '">提额</button>' +
+      '<button class="btn tiny" type="button" data-info="' + esc(p.nick) + '">资料</button>' +
+      '<button class="btn tiny" type="button" data-rotate="' + esc(p.nick) + '">换码</button>' +
+      (p.disabled
+        ? '<button class="btn tiny" type="button" data-restore="' + esc(p.nick) + '">恢复</button>'
+        : '<button class="btn tiny warn" type="button" data-drop="' + esc(p.nick) + '">移出</button>') +
+    '</span>';
+
+  el.querySelectorAll('[data-copy]').forEach((b) => {
+    b.addEventListener('click', () => copyLink(b.dataset.copy));
+  });
+  el.querySelectorAll('[data-rotate]').forEach((b) => {
+    b.addEventListener('click', () => rotateCode(b.dataset.rotate));
+  });
+  el.querySelectorAll('[data-money]').forEach((b) => {
+    b.addEventListener('click', () => adjustWallet(b.dataset.money, bal));
+  });
+  el.querySelectorAll('[data-limit]').forEach((b) => {
+    b.addEventListener('click', () => raiseLimit(b.dataset.limit));
+  });
+  el.querySelectorAll('[data-info]').forEach((b) => {
+    b.addEventListener('click', () => editPerson(b.dataset.info, p.phone || '', p.memo || ''));
+  });
+  el.querySelectorAll('[data-restore]').forEach((b) => {
+    b.addEventListener('click', () => restorePerson(b.dataset.restore));
+  });
+  el.querySelectorAll('[data-drop]').forEach((b) => {
+    b.addEventListener('click', () => dropPerson(b.dataset.drop));
+  });
+
+  return el;
+}
+
 function renderRoster(people) {
   const box = $('#rosterList');
   const active = people.filter((p) => !p.disabled);
+  const removed = people.filter((p) => p.disabled);
   const entered = active.filter((p) => p.devices > 0);
 
   $('#rosterCount').textContent = active.length;
@@ -533,59 +624,69 @@ function renderRoster(people) {
   }
 
   box.innerHTML = '';
-  people.forEach((p) => {
-    const el = document.createElement('div');
-    el.className = 'rrow' + (p.disabled ? ' is-off' : '');
+  active.forEach((p) => box.appendChild(buildRow(p)));
 
-    const devTag = (!p.disabled && p.devices > 1)
-      ? '<i class="badge-warn">' + p.devices + ' 台设备</i>'
-      : (p.devices ? p.devices + ' 台设备' : '未入场');
+  if (removed.length) {
+    const tg = document.createElement('button');
+    tg.type = 'button';
+    tg.className = 'rm-toggle';
+    tg.innerHTML = (S.showRemoved ? '−　收起已移出的 ' + removed.length + ' 人'
+                                  : '＋　已移出 ' + removed.length + ' 人（点开可查看 / 恢复）');
+    tg.addEventListener('click', () => {
+      S.showRemoved = !S.showRemoved;
+      renderRoster(people);
+    });
+    box.appendChild(tg);
 
-    const bal = p.credits === undefined ? 0 : p.credits;
-    el.innerHTML =
-      '<span class="rname">' + esc(p.nick) + '</span>' +
-      '<span class="rcode">' + esc(p.code) + '</span>' +
-      '<span class="rmeta">' +
-        '<b class="rbal' + (bal <= 2 ? ' is-low' : '') + '">' + bal + ' 次</b>' +
-        ' · ' + devTag + ' · 报名 ' + p.signups + ' 次' +
-        (p.phone ? ' · ' + esc(p.phone) : '') +
-        (p.memo ? ' · ' + esc(p.memo) : '') +
-      '</span>' +
-      '<span class="racts">' +
-        '<button class="btn tiny" data-copy="' + esc(p.code) + '">复制链接</button>' +
-        '<button class="btn tiny" data-money="' + esc(p.nick) + '">充值</button>' +
-        '<button class="btn tiny" data-limit="' + esc(p.nick) + '">提额</button>' +
-        '<button class="btn tiny" data-info="' + esc(p.nick) + '">资料</button>' +
-        '<button class="btn tiny" data-rotate="' + esc(p.nick) + '">换码</button>' +
-        (p.disabled
-          ? '<button class="btn tiny" data-restore="' + esc(p.nick) + '">恢复</button>'
-          : '<button class="btn tiny warn" data-drop="' + esc(p.nick) + '">移出</button>') +
-      '</span>';
+    if (S.showRemoved) {
+      removed.forEach((p) => box.appendChild(buildRow(p)));
+    }
+  }
+}
 
-    el.querySelectorAll('[data-copy]').forEach((b) => {
-      b.addEventListener('click', () => copyLink(b.dataset.copy));
-    });
-    el.querySelectorAll('[data-rotate]').forEach((b) => {
-      b.addEventListener('click', () => rotateCode(b.dataset.rotate));
-    });
-    el.querySelectorAll('[data-money]').forEach((b) => {
-      b.addEventListener('click', () => adjustWallet(b.dataset.money, bal));
-    });
-    el.querySelectorAll('[data-limit]').forEach((b) => {
-      b.addEventListener('click', () => raiseLimit(b.dataset.limit));
-    });
-    el.querySelectorAll('[data-info]').forEach((b) => {
-      b.addEventListener('click', () => editPerson(b.dataset.info, p.phone || '', p.memo || ''));
-    });
-    el.querySelectorAll('[data-restore]').forEach((b) => {
-      b.addEventListener('click', () => restorePerson(b.dataset.restore));
-    });
-    el.querySelectorAll('[data-drop]').forEach((b) => {
-      b.addEventListener('click', () => dropPerson(b.dataset.drop));
-    });
+/* ---------------- 输入联想 ---------------- */
 
-    box.appendChild(el);
+function renderSuggest(box, names, onPick) {
+  if (!names.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = '';
+  names.slice(0, 12).forEach((n) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'sg-item';
+    b.textContent = n;
+    b.addEventListener('click', () => { onPick(n); box.hidden = true; });
+    box.appendChild(b);
   });
+  if (names.length > 12) {
+    const more = document.createElement('div');
+    more.className = 'sg-more';
+    more.textContent = '还有 ' + (names.length - 12) + ' 个，再多输一个字';
+    box.appendChild(more);
+  }
+}
+
+function focusMember(nick) {
+  const p = (S.people || []).find((x) => x.nick === nick);
+  if (p && p.disabled && !S.showRemoved) {
+    S.showRemoved = true;
+    renderRoster(S.people);
+  }
+  setTimeout(() => {
+    const rows = $('#rosterList').querySelectorAll('.rrow');
+    for (const r of rows) {
+      if (r.dataset.nick === nick) {
+        r.classList.add('hl');
+        try { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { /* 忽略 */ }
+        setTimeout(() => r.classList.remove('hl'), 2400);
+        return;
+      }
+    }
+  }, 40);
 }
 
 async function copyLink(code) {
@@ -691,6 +792,23 @@ async function exportMembers() {
 }
 
 $('#rosterAdd').addEventListener('click', addNames);
+
+const memInput = $('#memSearch');
+if (memInput) {
+  memInput.addEventListener('input', () => {
+    const q = memInput.value.trim();
+    const box = $('#memSuggest');
+    if (!q) { box.hidden = true; box.innerHTML = ''; return; }
+    const k = q.toLowerCase();
+    const names = (S.people || [])
+      .filter((p) => p.nick.toLowerCase().indexOf(k) >= 0)
+      .map((p) => p.nick);
+    renderSuggest(box, names, (n) => {
+      memInput.value = '';
+      focusMember(n);
+    });
+  });
+}
 $('#cardAdd').addEventListener('click', () => editCard(null));
 $('#exportMembers').addEventListener('click', exportMembers);
 

@@ -1003,3 +1003,53 @@ body.admin { padding-bottom: 24px; }
 }
 .log-row .ltg { font-weight: 600; flex: none; }
 .log-row .ld { color: var(--muted); font-size: 11.5px; flex: 1; min-width: 120px; }
+
+/* ---------- 输入联想下拉 ---------- */
+.suggest {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  margin-top: 6px;
+  overflow: hidden;
+  max-height: 210px;
+  overflow-y: auto;
+  box-shadow: 0 8px 22px rgba(20, 28, 40, .10);
+}
+.sg-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  font-family: inherit;
+  color: var(--txt);
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+.sg-item:last-child { border-bottom: 0; }
+.sg-item:active { background: #f4f6f9; }
+.sg-more { padding: 9px 12px; font-size: 11.5px; color: var(--muted); background: #fafbfc; }
+
+/* 已移出会员折叠条 */
+.rm-toggle {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: #f7f8fa;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 11px 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.rm-toggle:active { background: #eff1f4; }
+
+/* 搜索定位高亮 */
+.rrow.hl {
+  background: #fff7e6;
+  box-shadow: inset 3px 0 0 #f79009;
+}
