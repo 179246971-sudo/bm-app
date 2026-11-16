@@ -12,7 +12,8 @@ const S = {
   board: null,
   editing: null,
   people: [],
-  showRemoved: false
+  showRemoved: false,
+  pinned: ''
 };
 
 function setKey(k) {
@@ -624,7 +625,31 @@ function renderRoster(people) {
   }
 
   box.innerHTML = '';
-  active.forEach((p) => box.appendChild(buildRow(p)));
+
+  // 搜索选中的那个人置顶，方便直接操作
+  const pin = S.pinned ? people.find((x) => x.nick === S.pinned) : null;
+  if (pin) {
+    const el = buildRow(pin);
+    el.classList.add('pinned');
+    box.appendChild(el);
+
+    const sep = document.createElement('div');
+    sep.className = 'pin-sep';
+    sep.innerHTML = '<span>↑ 搜索定位</span>';
+    const un = document.createElement('button');
+    un.type = 'button';
+    un.textContent = '取消置顶';
+    un.addEventListener('click', () => {
+      S.pinned = '';
+      renderRoster(S.people);
+    });
+    sep.appendChild(un);
+    box.appendChild(sep);
+  }
+
+  active
+    .filter((p) => !pin || p.nick !== pin.nick)
+    .forEach((p) => box.appendChild(buildRow(p)));
 
   if (removed.length) {
     const tg = document.createElement('button');
@@ -639,7 +664,9 @@ function renderRoster(people) {
     box.appendChild(tg);
 
     if (S.showRemoved) {
-      removed.forEach((p) => box.appendChild(buildRow(p)));
+      removed
+        .filter((p) => !pin || p.nick !== pin.nick)
+        .forEach((p) => box.appendChild(buildRow(p)));
     }
   }
 }
@@ -672,10 +699,12 @@ function renderSuggest(box, names, onPick) {
 
 function focusMember(nick) {
   const p = (S.people || []).find((x) => x.nick === nick);
-  if (p && p.disabled && !S.showRemoved) {
-    S.showRemoved = true;
-    renderRoster(S.people);
-  }
+  if (!p) return;
+
+  S.pinned = nick;                       // 置顶
+  if (p.disabled) S.showRemoved = true;  // 已移出的要先展开
+  renderRoster(S.people);
+
   setTimeout(() => {
     const rows = $('#rosterList').querySelectorAll('.rrow');
     for (const r of rows) {

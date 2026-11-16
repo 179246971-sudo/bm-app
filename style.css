@@ -1053,3 +1053,29 @@ body.admin { padding-bottom: 24px; }
   background: #fff7e6;
   box-shadow: inset 3px 0 0 #f79009;
 }
+
+/* 搜索选中的会员置顶 */
+.rrow.pinned {
+  background: #fffaf0;
+  box-shadow: inset 3px 0 0 #f79009;
+}
+.pin-sep {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 12px;
+  background: #fafbfc;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted);
+}
+.pin-sep button {
+  border: 0;
+  background: transparent;
+  color: #b54708;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 2px 4px;
+}
