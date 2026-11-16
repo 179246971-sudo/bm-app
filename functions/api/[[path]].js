@@ -1,28 +1,31 @@
 /**
- * Hihi Studio 报名工具 · 后端（Cloudflare Pages Functions）
- * v3：白名单入场
+ * Hihi Studio · 后端 v1.1（课表格子化）
  *
- * 会员：  GET  /api/board?k=码&client=设备号
- *         POST /api/signup   { date, slotId }
- *         POST /api/cancel   { date, slotId }
- *
- * 管理：  POST /api/admin/login        { password }
- *         GET  /api/admin/config
- *         POST /api/admin/config       { config }
- *         GET  /api/admin/board
- *         GET  /api/admin/cell?date=&slotId=
- *         POST /api/admin/sign         { date, slotId, nickname }
- *         POST /api/admin/remove       { date, slotId, nickname }
- *         GET  /api/admin/roster
- *         POST /api/admin/roster/add      { names }
- *         POST /api/admin/roster/rotate   { nick }
- *         POST /api/admin/roster/remove   { nick, clearSignups }
- *         POST /api/admin/roster/restore  { nick }
- *         POST /api/admin/rename          { nick, newNick }
- *         GET  /api/admin/export?week=0|1
+ * 核心变化：课表从「全周共用一组时段」改成「7 天 × N 节的格子矩阵」。
+ *   · 每一天可以有自己的时间、名额、开关
+ *   · 每节课固定 slotMinutes 分钟，结束时间由开始时间推算
+ *   · 老配置（periods / dayOff / override）会自动迁移，时段 id 保持不变
  */
 
 /* ==================== 默认课表 ==================== */
+
+const BASE_PERIODS = [
+  { id: 't1', start: '08:30', cap: 8 },
+  { id: 't2', start: '09:45', cap: 8 },
+  { id: 't3', start: '11:00', cap: 8 },
+  { id: 't4', start: '15:00', cap: 10 },
+  { id: 't5', start: '16:10', cap: 10 },
+  { id: 't6', start: '19:30', cap: 10 },
+  { id: 't7', start: '20:45', cap: 10 }
+];
+
+function defaultDays() {
+  const days = {};
+  for (let d = 0; d < 7; d++) {
+    days[d] = d === 0 ? [] : BASE_PERIODS.map((p) => ({ id: p.id, start: p.start, cap: p.cap }));
+  }
+  return days;
+}
 
 const DEFAULTS = {
   title: 'Hihi Studio',
@@ -30,25 +33,13 @@ const DEFAULTS = {
   cancelMin: 3,
   maxPerDay: 2,
   showStats: true,
-  periods: [
-    { id: 't1', start: '08:30', end: '09:30', cap: 8 },
-    { id: 't2', start: '09:45', end: '10:45', cap: 8 },
-    { id: 't3', start: '11:00', end: '12:00', cap: 8 },
-    { id: 't4', start: '15:00', end: '16:00', cap: 10 },
-    { id: 't5', start: '16:10', end: '17:10', cap: 10 },
-    { id: 't6', start: '19:30', end: '20:30', cap: 10 },
-    { id: 't7', start: '20:45', end: '21:45', cap: 10 }
-  ],
-  dayOff: [],
-  override: {}
+  slotMinutes: 60,
+  days: defaultDays()
 };
 
 const WEEK_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const TZ = 8 * 3600 * 1000;
-
-// 入场码字符集：去掉了 0/O/1/I/L 这些容易看错的
 const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-
 const LOGIN_MAX_FAILS = 5;
 const CODE_MAX_FAILS = 10;
 const LOCK_MS = 10 * 60 * 1000;
@@ -74,10 +65,22 @@ function parseYmd(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
   if (!m) return null;
   const y = +m[1], mo = +m[2], d = +m[3];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
   return { y, m: mo, d, dow: new Date(Date.UTC(y, mo - 1, d)).getUTCDay() };
 }
 
 function hhmmOk(s) { return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s || '')); }
+
+function toMin(s) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || ''));
+  if (!m) return -1;
+  return (+m[1]) * 60 + (+m[2]);
+}
+
+function fromMin(n) {
+  n = ((n % 1440) + 1440) % 1440;
+  return String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0');
+}
 
 function intIn(v, min, max, dflt) {
   const n = parseInt(v, 10);
@@ -93,34 +96,71 @@ function cleanName(s) {
   return String(s || '').replace(/\s+/g, ' ').trim().slice(0, 12);
 }
 
+function safeId(s) {
+  return String(s || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16);
+}
+
+function newId() {
+  const buf = new Uint8Array(5);
+  crypto.getRandomValues(buf);
+  let out = 's';
+  for (let i = 0; i < 5; i++) out += CODE_ALPHABET[buf[i] % CODE_ALPHABET.length];
+  return out.toLowerCase();
+}
+
 /* ==================== 配置 ==================== */
+
+function normSlot(s) {
+  if (!s || !hhmmOk(s.start)) return null;
+  const cap = intIn(s.cap, 0, 999, 8);
+  const out = {
+    id: safeId(s.id) || newId(),
+    start: s.start,
+    cap
+  };
+  if (s.off === true || cap === 0) out.off = true;
+  return out;
+}
+
+function normalizeDays(d) {
+  const out = {};
+  for (let i = 0; i < 7; i++) {
+    let arr = d[i];
+    if (!Array.isArray(arr) && Array.isArray(d[String(i)])) arr = d[String(i)];
+    if (!Array.isArray(arr)) arr = [];
+    out[i] = arr.map(normSlot).filter(Boolean).slice(0, 12);
+  }
+  return out;
+}
+
+// 老格式 → 新格式。保留原时段 id，历史报名不会错位。
+function migrateOld(c) {
+  const periods = Array.isArray(c.periods) ? c.periods : [];
+  const dayOff = Array.isArray(c.dayOff) ? c.dayOff.map(Number) : [];
+  const ov = (c.override && typeof c.override === 'object') ? c.override : {};
+  const days = {};
+  for (let d = 0; d < 7; d++) {
+    if (dayOff.indexOf(d) >= 0) { days[d] = []; continue; }
+    days[d] = periods.map((p) => {
+      const o = ov[d + '-' + p.id] || {};
+      const slot = {
+        id: safeId(p.id) || newId(),
+        start: hhmmOk(p.start) ? p.start : '09:00',
+        cap: o.cap === undefined ? intIn(p.cap, 0, 999, 8) : intIn(o.cap, 0, 999, 8)
+      };
+      if (o.off === true) slot.off = true;
+      return slot;
+    }).filter((s) => s);
+  }
+  return days;
+}
 
 function normalizeConfig(raw) {
   const c = raw && typeof raw === 'object' ? raw : {};
-  const periods = (Array.isArray(c.periods) ? c.periods : [])
-    .filter((p) => p && hhmmOk(p.start) && hhmmOk(p.end))
-    .slice(0, 20)
-    .map((p, i) => ({
-      id: String(p.id || 'p' + i).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16) || 'p' + i,
-      start: p.start,
-      end: p.end,
-      cap: intIn(p.cap, 1, 999, 8)
-    }));
-
-  const dayOff = (Array.isArray(c.dayOff) ? c.dayOff : [])
-    .map((x) => parseInt(x, 10))
-    .filter((n) => n >= 0 && n <= 6);
-
-  const override = {};
-  if (c.override && typeof c.override === 'object') {
-    for (const k of Object.keys(c.override)) {
-      const v = c.override[k] || {};
-      const o = {};
-      if (v.cap !== undefined) o.cap = intIn(v.cap, 0, 999, 8);
-      if (v.off === true) o.off = true;
-      override[k.slice(0, 24)] = o;
-    }
-  }
+  let days;
+  if (c.days && typeof c.days === 'object') days = normalizeDays(c.days);
+  else if (Array.isArray(c.periods)) days = normalizeDays(migrateOld(c));
+  else days = normalizeDays(DEFAULTS.days);
 
   return {
     title: String(c.title || DEFAULTS.title).slice(0, 40),
@@ -128,9 +168,8 @@ function normalizeConfig(raw) {
     cancelMin: intIn(c.cancelMin, 1, 120, 3),
     maxPerDay: intIn(c.maxPerDay, 1, 20, 2),
     showStats: c.showStats !== false,
-    periods: periods.length ? periods : DEFAULTS.periods.slice(),
-    dayOff,
-    override
+    slotMinutes: intIn(c.slotMinutes, 15, 300, 60),
+    days
   };
 }
 
@@ -149,18 +188,63 @@ async function saveConfig(env, cfg) {
   ).bind('schedule', JSON.stringify(cfg)).run();
 }
 
-/* ==================== 单元格 ==================== */
+/* ==================== 格子 ==================== */
 
-function findPeriod(cfg, id) {
-  return cfg.periods.find((x) => x.id === id) || null;
+function slotsOf(cfg, dow) {
+  const a = cfg.days[dow];
+  return Array.isArray(a) ? a : [];
 }
 
-function resolveCell(p, period, cfg) {
-  const ov = (cfg.override && cfg.override[p.dow + '-' + period.id]) || {};
-  const cap = ov.cap === undefined ? period.cap : ov.cap;
-  const off = ov.off === true || cfg.dayOff.indexOf(p.dow) >= 0 || cap <= 0;
-  const [sh, sm] = period.start.split(':').map(Number);
-  return { cap, off, startEpoch: bjEpoch(p.y, p.m, p.d, sh, sm) };
+function maxRows(cfg) {
+  let n = 0;
+  for (let d = 0; d < 7; d++) n = Math.max(n, slotsOf(cfg, d).length);
+  return n;
+}
+
+// 每一行的"常规时间"：该行出现次数最多的开始时间
+function rowStd(cfg, rows) {
+  const out = [];
+  for (let i = 0; i < rows; i++) {
+    const cnt = {};
+    for (let d = 0; d < 7; d++) {
+      const s = slotsOf(cfg, d)[i];
+      if (s && !s.off) cnt[s.start] = (cnt[s.start] || 0) + 1;
+    }
+    let best = '';
+    let n = 0;
+    for (const k of Object.keys(cnt)) {
+      if (cnt[k] > n) { n = cnt[k]; best = k; }
+    }
+    out.push(best);
+  }
+  return out;
+}
+
+function slotEnd(cfg, slot) {
+  const sm = toMin(slot.start);
+  return fromMin(sm + cfg.slotMinutes);
+}
+
+function resolveCell(p, slot, cfg) {
+  if (!slot) return null;
+  const cap = slot.cap === undefined ? 0 : slot.cap;
+  const off = slot.off === true || cap <= 0;
+  const [sh, sm] = slot.start.split(':').map(Number);
+  return {
+    cap,
+    off,
+    start: slot.start,
+    end: slotEnd(cfg, slot),
+    startEpoch: bjEpoch(p.y, p.m, p.d, sh, sm)
+  };
+}
+
+function findSlot(cfg, dow, slotId) {
+  const arr = slotsOf(cfg, dow);
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i].id === slotId) return { slot: arr[i], index: i };
+  }
+  return null;
 }
 
 /* ==================== 名单 / 入场码 ==================== */
@@ -196,7 +280,6 @@ async function rosterByNick(env, nick) {
   } catch (e) { return null; }
 }
 
-// 记一下「这个码被哪台设备用过」，用来提示可能外泄
 async function touchDevice(env, code, clientId) {
   if (!code || !clientId) return;
   try {
@@ -236,8 +319,7 @@ async function addFail(env, key, maxFails) {
   try {
     const now = Date.now();
     const row = await env.DB.prepare('SELECT fails, until FROM throttle WHERE key = ?1').bind(key).first();
-    const base = (row && row.until > now) ? row.fails : (row ? row.fails : 0);
-    let fails = base + 1;
+    let fails = (row ? row.fails : 0) + 1;
     let until = 0;
     if (fails >= maxFails) { until = now + LOCK_MS; fails = 0; }
     await env.DB.prepare(
@@ -288,6 +370,8 @@ async function loadBoard(env, cfg, who, clientId) {
   }
 
   const myName = who ? who.nick : '';
+  const rows = maxRows(cfg);
+  const std = rowStd(cfg, rows);
 
   let stats = null;
   if (cfg.showStats) {
@@ -324,14 +408,25 @@ async function loadBoard(env, cfg, who, clientId) {
     days: days.map(({ date, p }) => {
       const past = date < todayStr;
       const isToday = date === todayStr;
-      const cells = cfg.periods.map((per) => {
-        const cc = resolveCell(p, per, cfg);
-        const list = bucket.get(date + '|' + per.id) || [];
+      const arr = slotsOf(cfg, p.dow);
+
+      const cells = [];
+      for (let i = 0; i < rows; i++) {
+        const slot = arr[i];
+        if (!slot) { cells.push({ row: i, empty: true }); continue; }
+
+        const cc = resolveCell(p, slot, cfg);
+        const list = bucket.get(date + '|' + slot.id) || [];
         const mineRow = myName ? (list.find((x) => x.nickname === myName) || null) : null;
         const count = list.length;
-        return {
-          periodId: per.id,
-          time: per.start + '-' + per.end,
+
+        cells.push({
+          row: i,
+          periodId: slot.id,
+          start: cc.start,
+          end: cc.end,
+          time: cc.start + '-' + cc.end,
+          odd: !!std[i] && cc.start !== std[i],
           cap: cc.cap,
           count,
           full: cc.cap > 0 && count >= cc.cap,
@@ -341,15 +436,15 @@ async function loadBoard(env, cfg, who, clientId) {
           canCancel: !!mineRow && now - mineRow.created_at <= cancelMs,
           cancelLeft: mineRow ? Math.max(0, cancelMs - (now - mineRow.created_at)) : 0,
           names: list.map((x) => x.nickname)
-        };
-      });
+        });
+      }
 
       let myCountToday = 0;
       if (myName) {
-        myCountToday = cfg.periods.filter((per) => {
+        for (const per of arr) {
           const l = bucket.get(date + '|' + per.id) || [];
-          return l.some((x) => x.nickname === myName);
-        }).length;
+          if (l.some((x) => x.nickname === myName)) myCountToday++;
+        }
       }
 
       return { date, weekday: WEEK_CN[p.dow], md: mdText(p), past, isToday, myCountToday, cells };
@@ -362,9 +457,11 @@ async function loadBoard(env, cfg, who, clientId) {
     now, today: todayStr,
     cancelMin: cfg.cancelMin,
     maxPerDay: cfg.maxPerDay,
+    slotMinutes: cfg.slotMinutes,
     stats,
     myName,
-    periods: cfg.periods.map((p) => ({ id: p.id, start: p.start, end: p.end })),
+    rows,
+    rowStd: std,
     weeks: outWeeks
   };
 }
@@ -378,10 +475,12 @@ async function doSignup(env, cfg, who, body) {
   const { date, slotId } = body || {};
   const p = parseYmd(date);
   if (!p) return { error: '日期不对' };
-  const period = findPeriod(cfg, slotId);
-  if (!period) return { error: '没有这个时段' };
 
-  const cc = resolveCell(p, period, cfg);
+  const found = findSlot(cfg, p.dow, slotId);
+  if (!found) return { error: '没有这个时段' };
+  const slot = found.slot;
+
+  const cc = resolveCell(p, slot, cfg);
   if (cc.off) return { error: '这个时段不开课' };
   if (Date.now() >= cc.startEpoch) return { error: '这个时段已经开始了，不能再报名' };
 
@@ -399,7 +498,7 @@ async function doSignup(env, cfg, who, body) {
 
   let res;
   try {
-    res = await env.DB.prepare(sql).bind(date, slotId, who.nick, Date.now(), cc.cap).run();
+    res = await env.DB.prepare(sql).bind(date, slot.id, who.nick, Date.now(), cc.cap).run();
   } catch (e) {
     if (/UNIQUE/i.test(String((e && e.message) || ''))) return { error: '你已经报过这个时段了' };
     throw e;
@@ -433,10 +532,12 @@ async function doCancel(env, cfg, who, body) {
 async function adminCell(env, cfg, date, slotId) {
   const p = parseYmd(date);
   if (!p) return { error: '日期不对' };
-  const period = findPeriod(cfg, slotId);
-  if (!period) return { error: '没有这个时段' };
 
-  const cc = resolveCell(p, period, cfg);
+  const found = findSlot(cfg, p.dow, slotId);
+  if (!found) return { error: '没有这个时段' };
+  const slot = found.slot;
+
+  const cc = resolveCell(p, slot, cfg);
   const now = Date.now();
   const todayStr = ymd(bjParts(now));
 
@@ -448,8 +549,10 @@ async function adminCell(env, cfg, date, slotId) {
 
   return {
     date, slotId,
+    row: found.index,
     weekday: WEEK_CN[p.dow], md: mdText(p),
-    time: period.start + '-' + period.end,
+    start: cc.start, end: cc.end,
+    time: cc.start + '-' + cc.end,
     cap: cc.cap, count: people.length, off: cc.off,
     started: now >= cc.startEpoch,
     past: date < todayStr,
@@ -469,10 +572,12 @@ async function adminSign(env, cfg, body) {
 
   const p = parseYmd(date);
   if (!p) return { error: '日期不对' };
-  const period = findPeriod(cfg, slotId);
-  if (!period) return { error: '没有这个时段' };
 
-  const cc = resolveCell(p, period, cfg);
+  const found = findSlot(cfg, p.dow, slotId);
+  if (!found) return { error: '没有这个时段' };
+  const slot = found.slot;
+
+  const cc = resolveCell(p, slot, cfg);
   if (cc.off) return { error: '这个时段不开课' };
   if (Date.now() >= cc.startEpoch) return { error: '这个时段已经开始了，不能再报名' };
 
@@ -499,10 +604,11 @@ async function adminRemove(env, cfg, body) {
 
   const p = parseYmd(date);
   if (!p) return { error: '日期不对' };
-  const period = findPeriod(cfg, slotId);
-  if (!period) return { error: '没有这个时段' };
 
-  const cc = resolveCell(p, period, cfg);
+  const found = findSlot(cfg, p.dow, slotId);
+  if (!found) return { error: '没有这个时段' };
+
+  const cc = resolveCell(p, found.slot, cfg);
   if (Date.now() >= cc.startEpoch) return { error: '这个时段已经开始了，不能改报名' };
 
   const res = await env.DB.prepare(
@@ -651,15 +757,15 @@ async function adminExport(env, cfg, week) {
     map.get(k).push(r.nickname);
   }
 
-  const rows = [['日期', '星期', '时段', '名额', '已报', '报名人']];
+  const rows = [['日期', '星期', '开始', '结束', '名额', '已报', '报名人']];
   for (let i = 0; i < 7; i++) {
     const p = bjParts(base + offset + i * 86400000);
     const date = ymd(p);
-    for (const per of cfg.periods) {
-      const cc = resolveCell(p, per, cfg);
+    for (const slot of slotsOf(cfg, p.dow)) {
+      const cc = resolveCell(p, slot, cfg);
       if (cc.off) continue;
-      const names = map.get(date + '|' + per.id) || [];
-      rows.push([date, WEEK_CN[p.dow], per.start + '-' + per.end,
+      const names = map.get(date + '|' + slot.id) || [];
+      rows.push([date, WEEK_CN[p.dow], cc.start, cc.end,
                  String(cc.cap), String(names.length), names.join('、')]);
     }
   }
@@ -696,7 +802,6 @@ export async function onRequest(context) {
   }
 
   try {
-    /* ---- 管理：登录 ---- */
     if (path === 'admin/login') {
       if (request.method !== 'POST') return json({ error: '请用 POST' }, 405);
       if (!env.ADMIN_PASSWORD) {
@@ -714,7 +819,6 @@ export async function onRequest(context) {
       return json({ ok: true });
     }
 
-    /* ---- 管理：其余都要密码 ---- */
     if (path.indexOf('admin/') === 0) {
       if (!isAdmin(env, request)) return json({ error: '没有权限，请重新登录' }, 401);
       const cfg = await getConfig(env);
@@ -761,7 +865,6 @@ export async function onRequest(context) {
       return json({ error: '接口不存在' }, 404);
     }
 
-    /* ---- 会员 ---- */
     const cfg = await getConfig(env);
 
     const code = normCode(url.searchParams.get('k'));
