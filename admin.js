@@ -661,28 +661,38 @@ async function restorePerson(nick) {
   }
 }
 
-async function exportCsv(week) {
+async function exportMembers() {
+  const btn = $('#exportMembers');
+  btn.disabled = true;
+  $('#exportHint').textContent = '正在生成…';
   try {
-    const r = await fetch('/api/admin/export?week=' + week, { headers: { 'x-admin-key': S.key } });
-    if (!r.ok) { alert('导出失败，请重新登录'); return; }
+    const r = await fetch('/api/admin/export-members', { headers: { 'x-admin-key': S.key } });
+    if (!r.ok) { $('#exportHint').textContent = '导出失败，请重新登录'; return; }
+
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
+    const t = new Date();
     a.href = url;
-    a.download = '报名_' + (week ? '下周' : '本周') + '.csv';
+    a.download = '会员表_' + t.getFullYear() + '-' +
+      String(t.getMonth() + 1).padStart(2, '0') + '-' +
+      String(t.getDate()).padStart(2, '0') + '.csv';
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 3000);
+
+    $('#exportHint').textContent = '已导出，用 Excel 打开';
   } catch (e) {
-    alert('导出失败：' + e.message);
+    $('#exportHint').textContent = '导出失败：' + e.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 
 $('#rosterAdd').addEventListener('click', addNames);
 $('#cardAdd').addEventListener('click', () => editCard(null));
-$('#exportThis').addEventListener('click', () => exportCsv(0));
-$('#exportNext').addEventListener('click', () => exportCsv(1));
+$('#exportMembers').addEventListener('click', exportMembers);
 
 /* ==================== 通用小表单弹窗 ==================== */
 

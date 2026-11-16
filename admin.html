@@ -6,7 +6,7 @@
   <meta name="format-detection" content="telephone=no">
   <meta name="robots" content="noindex,nofollow">
   <title>Hihi Studio · 管理后台</title>
-  <link rel="stylesheet" href="style.css?v=14">
+  <link rel="stylesheet" href="style.css?v=15">
 </head>
 <body class="admin">
 
@@ -122,9 +122,9 @@
         </div>
 
         <div class="fld">
-          <label>导出名单（Excel 能直接打开）</label>
-          <button id="exportThis" class="btn small" type="button">导出本周</button>
-          <button id="exportNext" class="btn small" type="button">导出下周</button>
+          <label>导出会员表（含手机号、余额、消费记录，内部对账用）</label>
+          <button id="exportMembers" class="btn small" type="button">导出会员表 CSV</button>
+          <div class="hint" id="exportHint"></div>
         </div>
       </div>
       <!-- 系统管理 -->
@@ -150,7 +150,7 @@
     <div class="dialog" id="dialog" role="dialog" aria-modal="true"></div>
   </div>
 
-  <script src="grid.js?v=14"></script>
-  <script src="admin.js?v=14"></script>
+  <script src="grid.js?v=15"></script>
+  <script src="admin.js?v=15"></script>
 </body>
 </html>
