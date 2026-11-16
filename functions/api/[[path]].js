@@ -458,6 +458,15 @@ async function rosterByCode(env, code) {
   } catch (e) { return null; }
 }
 
+async function rosterByNickCI(env, nick) {
+  if (!nick) return null;
+  try {
+    return await env.DB.prepare(
+      'SELECT nick, code, disabled FROM roster WHERE nick = ?1 COLLATE NOCASE'
+    ).bind(nick).first();
+  } catch (e) { return null; }
+}
+
 async function rosterByNick(env, nick) {
   if (!nick) return null;
   try {
@@ -1279,7 +1288,7 @@ async function adminRosterAdd(env, body) {
   const skipped = [];
 
   for (const nick of uniq) {
-    const exist = await env.DB.prepare('SELECT disabled FROM roster WHERE nick = ?1').bind(nick).first();
+    const exist = await rosterByNickCI(env, nick);
     if (exist) {
       if (exist.disabled) {
         await env.DB.prepare('UPDATE roster SET disabled = 0 WHERE nick = ?1').bind(nick).run();
@@ -1350,7 +1359,10 @@ async function adminRename(env, body) {
 
   const r = await rosterByNick(env, nick);
   if (!r) return { error: '名单里没有这个人' };
-  if (await rosterByNick(env, newNick)) return { error: '「' + newNick + '」已经在名单里了' };
+  const clash = await rosterByNickCI(env, newNick);
+  if (clash && clash.nick !== nick) {
+    return { error: '「' + clash.nick + '」已经在名单里了（英文不区分大小写）' };
+  }
 
   await env.DB.prepare('UPDATE roster SET nick = ?1 WHERE nick = ?2').bind(newNick, nick).run();
   await env.DB.prepare('UPDATE signups SET nickname = ?1 WHERE nickname = ?2').bind(newNick, nick).run();
